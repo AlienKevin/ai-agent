@@ -1,8 +1,14 @@
 import os
-from mistralai import Mistral
+from litellm import completion
 import discord
 import json
-MISTRAL_MODEL = "mistral-large-latest"
+
+MODELS = {
+    "mistral": "mistral/mistral-large-latest",
+    "gemini": "gemini/gemini-2.0-flash"
+}
+CURRENT_MODEL = "gemini"
+
 SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these steps:
 1. If the user hasn't specified a topic yet, ask them what topic they want to learn about
 2. Generate multiple choice questions to test their understanding, focusing on areas they struggled with previously
@@ -12,8 +18,8 @@ Keep track of their performance to adapt questions to their needs."""
 
 class StudyAgent:
     def __init__(self):
-        MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-        self.client = Mistral(api_key=MISTRAL_API_KEY)
+        os.environ["MISTRAL_API_KEY"] = os.getenv("MISTRAL_API_KEY")
+        os.environ["GEMINI_API_KEY"] = os.getenv("GEMINI_API_KEY")
         self.conversation_state = {}  # Track state per user
 
     async def _generate_question(self, topic: str, weak_areas=None, question_history=None):
@@ -30,14 +36,15 @@ class StudyAgent:
             {"role": "user", "content": content}
         ]
 
-        response = await self.client.chat.complete_async(
-            model=MISTRAL_MODEL,
+        response = completion(
+            model=MODELS[CURRENT_MODEL],
             messages=messages,
         )
 
         question_response = response.choices[0].message.content
         parts = question_response.split("CORRECT:")
         return parts[0].strip(), parts[1].strip()
+
     async def _evaluate_answer(self, question: str, user_answer: str, correct_answer: str):
         """Evaluate the user's answer and return feedback."""
         messages = [
@@ -47,8 +54,8 @@ class StudyAgent:
 
         for attempt in range(3):
             try:
-                response = await self.client.chat.complete_async(
-                    model=MISTRAL_MODEL,
+                response = await completion(
+                    model=MODELS[CURRENT_MODEL],
                     messages=messages,
                     response_format={"type": "json_object"}
                 )
@@ -90,8 +97,8 @@ class StudyAgent:
             {"role": "user", "content": message.content}
         ]
         
-        response = await self.client.chat.complete_async(
-            model=MISTRAL_MODEL,
+        response = completion(
+            model=MODELS[CURRENT_MODEL],
             messages=messages,
             response_format={"type": "json_object"}
         )
@@ -113,8 +120,8 @@ class StudyAgent:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Answer this followup question about {state['topic']}: {message.content}"}
             ]
-            response = await self.client.chat.complete_async(
-                model=MISTRAL_MODEL,
+            response = completion(
+                model=MODELS[CURRENT_MODEL],
                 messages=messages
             )
             answer = response.choices[0].message.content
