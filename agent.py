@@ -3,7 +3,10 @@ from mistralai import Mistral
 import discord
 
 MISTRAL_MODEL = "mistral-large-latest"
-SYSTEM_PROMPT = "You are a helpful assistant."
+SYSTEM_PROMPT = "You are a study assistant that helps someone learn by giving them practice questions. " \
+                "You ask the user what subject they want to study. " \
+                "Then you ask them a question about that subject which has a single-word answer. " \
+                "When they answer, tell them if they got the question right or wrong and why."
 
 
 class MistralAgent:
