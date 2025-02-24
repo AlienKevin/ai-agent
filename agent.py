@@ -1,4 +1,5 @@
 import os
+import litellm
 from litellm import completion
 import discord
 import json
@@ -15,6 +16,8 @@ SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these 
 3. When they answer, grade their response and provide helpful feedback
 4. Continue with more questions on the same topic until they want to switch topics
 Keep track of their performance to adapt questions to their needs."""
+
+litellm.enable_json_schema_validation=True
 
 class StudyAgent:
     def __init__(self):
@@ -54,7 +57,7 @@ class StudyAgent:
 
         for attempt in range(3):
             try:
-                response = await completion(
+                response = completion(
                     model=MODELS[CURRENT_MODEL],
                     messages=messages,
                     response_format={"type": "json_object"}
@@ -81,31 +84,62 @@ class StudyAgent:
             "question_history": [],  # Track previous questions and answers
             "weak_areas": set()      # Track concepts user struggled with
         }
+        print("initialized state")
         return "How can I help you learn today?"
 
     async def run(self, message: discord.Message):
+        print("running")
         user_id = str(message.author.id)
         
         if user_id not in self.conversation_state:
             return self._initialize_state(user_id)
+        
+        print("continuing")
 
         state = self.conversation_state[user_id]
 
         # First check if this is a followup question or topic switch
         messages = [
-            {"role": "system", "content": "You are an assistant that categorizes user messages. Return a JSON with format: {\"type\": \"followup_question|switch_topic|answer\", \"new_topic\": \"topic if switching, else null\"}"},
+            {"role": "system", "content": "You are an assistant that categorizes user response to a question."},
             {"role": "user", "content": message.content}
         ]
         
         response = completion(
             model=MODELS[CURRENT_MODEL],
             messages=messages,
-            response_format={"type": "json_object"}
+            response_format={
+                "type": "json_object",
+                "response_schema": {
+                    "type": "object",
+                    "properties": {
+                        "response_type": {
+                            "type": "string", 
+                            "enum": ["answer", "followup_question", "switch_topic"]
+                        },
+                        "new_topic": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["response_type", "new_topic"]
+                },
+                "strict": True
+            }
         )
         
-        msg_type = json.loads(response.choices[0].message.content)
+        try:
+            msg_type = json.loads(response.choices[0].message.content)
+            
+            # Validate the response format
+            if not ("response_type" in msg_type and 
+                   msg_type["response_type"] in ["answer", "followup_question", "switch_topic"] and
+                   "new_topic" in msg_type):
+                print("Invalid response format: ", response.choices[0].message.content)
+                msg_type = {"response_type": "answer", "new_topic": None}
+        except json.JSONDecodeError:
+            print("Failed to parse response: ", response.choices[0].message.content) 
+            msg_type = {"response_type": "answer", "new_topic": None}
         
-        if msg_type["type"] == "switch_topic":
+        if msg_type["response_type"] == "switch_topic":
             state["state"] = "initial"
             state["topic"] = msg_type["new_topic"] if msg_type["new_topic"] else None
             state["weak_areas"] = set()
@@ -115,18 +149,17 @@ class StudyAgent:
                 return state["question"]
             return "What new topic would you like to learn about?"
             
-        if msg_type["type"] == "followup_question":
+        if msg_type["response_type"] == "followup_question":
+            # User is asking a question about the topic
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Answer this followup question about {state['topic']}: {message.content}"}
+                {"role": "user", "content": f"Answer this question about {state['topic']}: {message.content}"}
             ]
             response = completion(
                 model=MODELS[CURRENT_MODEL],
                 messages=messages
             )
-            answer = response.choices[0].message.content
-            state["question"], state["correct_answer"] = await self._generate_question(state["topic"])
-            return f"{answer}\n\nWould you like to continue with the next question?\n{state['question']}"
+            return response.choices[0].message.content
             
         if state["state"] == "initial":
             # User is providing the topic
