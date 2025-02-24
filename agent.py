@@ -1,14 +1,9 @@
 import os
-import litellm
-from litellm import completion
+from google import genai
 import discord
 import json
 
-MODELS = {
-    "mistral": "mistral/mistral-large-latest",
-    "gemini": "gemini/gemini-2.0-flash"
-}
-CURRENT_MODEL = "gemini"
+MODEL = "gemini-2.0-flash"
 
 SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these steps:
 1. If the user hasn't specified a topic yet, ask them what topic they want to learn about
@@ -17,12 +12,9 @@ SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these 
 4. Continue with more questions on the same topic until they want to switch topics
 Keep track of their performance to adapt questions to their needs."""
 
-litellm.enable_json_schema_validation=True
-
 class StudyAgent:
     def __init__(self):
-        os.environ["MISTRAL_API_KEY"] = os.getenv("MISTRAL_API_KEY")
-        os.environ["GEMINI_API_KEY"] = os.getenv("GEMINI_API_KEY")
+        self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.conversation_state = {}  # Track state per user
 
     async def _generate_question(self, topic: str, weak_areas=None, question_history=None):
@@ -32,47 +24,102 @@ class StudyAgent:
             content += f"\nFocus on these weak areas if possible: {list(weak_areas)}"
         if question_history:
             content += f"\nPrevious questions: {question_history}"
-        content += "\nInclude 4 options (A,B,C,D) and indicate the correct answer in a separate line starting with CORRECT:"
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": content}
-        ]
-
-        response = completion(
-            model=MODELS[CURRENT_MODEL],
-            messages=messages,
+        print("generating question")
+        response = self.client.models.generate_content(
+            model=MODEL,
+            contents=content,
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The multiple choice question text"
+                        },
+                        "options": {
+                            "type": "object",
+                            "properties": {
+                                "A": {
+                                    "type": "string",
+                                    "description": "The first multiple choice option"
+                                },
+                                "B": {
+                                    "type": "string",
+                                    "description": "The second multiple choice option"
+                                },
+                                "C": {
+                                    "type": "string",
+                                    "description": "The third multiple choice option"
+                                },
+                                "D": {
+                                    "type": "string",
+                                    "description": "The fourth multiple choice option"
+                                }
+                            },
+                            "required": ["A", "B", "C", "D"]
+                        },
+                        "correct_answer": {
+                            "type": "string",
+                            "enum": ["A", "B", "C", "D"]
+                        }
+                    },
+                    "required": ["question", "options", "correct_answer"]
+                }
+            }
         )
 
-        question_response = response.choices[0].message.content
-        parts = question_response.split("CORRECT:")
-        return parts[0].strip(), parts[1].strip()
+        print("response", response.text)
+
+        question_data = json.loads(response.text)
+        
+        # Format the question text with options
+        formatted_question = (
+            f"{question_data['question']}\n\n"
+            f"A) {question_data['options']['A']}\n"
+            f"B) {question_data['options']['B']}\n"
+            f"C) {question_data['options']['C']}\n"
+            f"D) {question_data['options']['D']}"
+        )
+        
+        return formatted_question, question_data['correct_answer']
 
     async def _evaluate_answer(self, question: str, user_answer: str, correct_answer: str):
         """Evaluate the user's answer and return feedback."""
-        messages = [
-            {"role": "system", "content": "You are an educational assistant evaluating a student's answer. Return a JSON with format: {\"correct\": boolean, \"concept\": \"specific concept tested\", \"feedback\": \"detailed explanation\"}"},
-            {"role": "user", "content": f"Question: {question}\nStudent answered: {user_answer}\nCorrect answer: {correct_answer}"}
-        ]
+        content = f"Question: {question}\nStudent answered: {user_answer}\nCorrect answer: {correct_answer}"
 
-        for attempt in range(3):
-            try:
-                response = completion(
-                    model=MODELS[CURRENT_MODEL],
-                    messages=messages,
-                    response_format={"type": "json_object"}
-                )
-
-                eval_response = json.loads(response.choices[0].message.content)
-                if (isinstance(eval_response["correct"], bool) and 
-                    isinstance(eval_response["concept"], str) and 
-                    isinstance(eval_response["feedback"], str)):
-                    return eval_response
-            except:
-                if attempt == 2:
-                    print(response)
-                    return None
-        return None
+        try:
+            print("evaluating answer")
+            response = self.client.models.generate_content(
+                model=MODEL,
+                contents=content,
+                config={
+                    'response_mime_type': 'application/json',
+                    'response_schema': {
+                        "type": "object",
+                        "properties": {
+                            "correct": {
+                                "type": "boolean",
+                                "description": "Whether the student's answer was correct"
+                            },
+                            "concept": {
+                                "type": "string",
+                                "description": "The specific concept being tested"
+                            },
+                            "feedback": {
+                                "type": "string", 
+                                "description": "Detailed explanation and feedback"
+                            }
+                        },
+                        "required": ["correct", "concept", "feedback"]
+                    }
+                }
+            )
+            return json.loads(response.text)
+        except:
+            print(response)
+            return None
 
     def _initialize_state(self, user_id: str):
         """Initialize conversation state for a new user."""
@@ -88,56 +135,59 @@ class StudyAgent:
         return "How can I help you learn today?"
 
     async def run(self, message: discord.Message):
-        print("running")
+        print("running on message", message.content)
         user_id = str(message.author.id)
         
         if user_id not in self.conversation_state:
             return self._initialize_state(user_id)
         
-        print("continuing")
-
         state = self.conversation_state[user_id]
 
         # First check if this is a followup question or topic switch
-        messages = [
-            {"role": "system", "content": "You are an assistant that categorizes user response to a question."},
-            {"role": "user", "content": message.content}
-        ]
+        content = f"""User message: {message.content}
+        Categorize the type of response the user gave.
+        1. An answer can be A, B, C, D, or expression of uncertainty like not sure.
+        2. A followup question is if the user is asking a question about the topic.
+        3. A switch topic is if the user wants to learn about a new topic.
+        """
         
-        response = completion(
-            model=MODELS[CURRENT_MODEL],
-            messages=messages,
-            response_format={
-                "type": "json_object",
-                "response_schema": {
+        print("categorizing response")
+        response = self.client.models.generate_content(
+            model=MODEL,
+            contents=content,
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': {
                     "type": "object",
                     "properties": {
                         "response_type": {
                             "type": "string", 
-                            "enum": ["answer", "followup_question", "switch_topic"]
+                            "enum": ["answer", "followup_question", "switch_topic"],
                         },
                         "new_topic": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "The new topic the user wants to learn about (if applicable)"
                         }
                     },
                     "required": ["response_type", "new_topic"]
-                },
-                "strict": True
+                }
             }
         )
         
         try:
-            msg_type = json.loads(response.choices[0].message.content)
+            msg_type = json.loads(response.text)
             
             # Validate the response format
             if not ("response_type" in msg_type and 
                    msg_type["response_type"] in ["answer", "followup_question", "switch_topic"] and
                    "new_topic" in msg_type):
-                print("Invalid response format: ", response.choices[0].message.content)
+                print("Invalid response format: ", response.text)
                 msg_type = {"response_type": "answer", "new_topic": None}
         except json.JSONDecodeError:
-            print("Failed to parse response: ", response.choices[0].message.content) 
+            print("Failed to parse response: ", response.text) 
             msg_type = {"response_type": "answer", "new_topic": None}
+
+        print("msg_type", msg_type)
         
         if msg_type["response_type"] == "switch_topic":
             state["state"] = "initial"
@@ -151,15 +201,13 @@ class StudyAgent:
             
         if msg_type["response_type"] == "followup_question":
             # User is asking a question about the topic
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Answer this question about {state['topic']}: {message.content}"}
-            ]
-            response = completion(
-                model=MODELS[CURRENT_MODEL],
-                messages=messages
+            content = f"Answer this question about {state['topic']}: {message.content}"
+            print("responding to followup question")
+            response = self.client.models.generate_content(
+                model=MODEL,
+                contents=content
             )
-            return response.choices[0].message.content
+            return response.text
             
         if state["state"] == "initial":
             # User is providing the topic
