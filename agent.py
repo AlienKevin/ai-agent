@@ -38,7 +38,6 @@ class StudyAgent:
         question_response = response.choices[0].message.content
         parts = question_response.split("CORRECT:")
         return parts[0].strip(), parts[1].strip()
-
     async def _evaluate_answer(self, question: str, user_answer: str, correct_answer: str):
         """Evaluate the user's answer and return feedback."""
         messages = [
@@ -84,13 +83,43 @@ class StudyAgent:
             return self._initialize_state(user_id)
 
         state = self.conversation_state[user_id]
+
+        # First check if this is a followup question or topic switch
+        messages = [
+            {"role": "system", "content": "You are an assistant that categorizes user messages. Return a JSON with format: {\"type\": \"followup_question|switch_topic|answer\", \"new_topic\": \"topic if switching, else null\"}"},
+            {"role": "user", "content": message.content}
+        ]
         
-        # Check if user wants to switch topics
-        if "new topic" in message.content.lower() or "switch topic" in message.content.lower():
+        response = await self.client.chat.complete_async(
+            model=MISTRAL_MODEL,
+            messages=messages,
+            response_format={"type": "json_object"}
+        )
+        
+        msg_type = json.loads(response.choices[0].message.content)
+        
+        if msg_type["type"] == "switch_topic":
             state["state"] = "initial"
-            state["topic"] = None
+            state["topic"] = msg_type["new_topic"] if msg_type["new_topic"] else None
             state["weak_areas"] = set()
+            if state["topic"]:
+                state["state"] = "asking_question"
+                state["question"], state["correct_answer"] = await self._generate_question(state["topic"])
+                return state["question"]
             return "What new topic would you like to learn about?"
+            
+        if msg_type["type"] == "followup_question":
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Answer this followup question about {state['topic']}: {message.content}"}
+            ]
+            response = await self.client.chat.complete_async(
+                model=MISTRAL_MODEL,
+                messages=messages
+            )
+            answer = response.choices[0].message.content
+            state["question"], state["correct_answer"] = await self._generate_question(state["topic"])
+            return f"{answer}\n\nWould you like to continue with the next question?\n{state['question']}"
             
         if state["state"] == "initial":
             # User is providing the topic
@@ -134,4 +163,4 @@ class StudyAgent:
                 state["question_history"]
             )
             
-            return f"{feedback}\n\nNext question:\n{state['question']}"
+            return f"{feedback}\n\nNext question:\n{state['question']}\n\nYou're welcome to ask me any followup questions or switch to another topic!"
