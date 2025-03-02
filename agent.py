@@ -1,7 +1,10 @@
 import os
 from google import genai
+from google.genai import types
 import discord
 import json
+import pathlib
+import httpx
 
 MODEL = "gemini-2.0-flash"
 
@@ -17,7 +20,7 @@ class StudyAgent:
         self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.conversation_state = {}  # Track state per user
 
-    async def _generate_question(self, topic: str, weak_areas=None, question_history=None):
+    async def _generate_question(self, topic: str, weak_areas=None, question_history=None, pdf_files=None):
         """Generate a multiple choice question about the given topic."""
         content = f"Generate a multiple choice question about {topic}."
         if weak_areas:
@@ -26,9 +29,25 @@ class StudyAgent:
             content += f"\nPrevious questions: {question_history}"
 
         print("generating question")
+        
+        contents = []
+        
+        # Add PDF files to the contents if available
+        if pdf_files:
+            for pdf_path in pdf_files:
+                contents.append(
+                    types.Part.from_bytes(
+                        data=pathlib.Path(pdf_path).read_bytes(),
+                        mime_type='application/pdf',
+                    )
+                )
+        
+        # Add the text content
+        contents.append(content)
+        
         response = self.client.models.generate_content(
             model=MODEL,
-            contents=content,
+            contents=contents,
             config={
                 'response_mime_type': 'application/json',
                 'response_schema': {
@@ -85,15 +104,31 @@ class StudyAgent:
         
         return formatted_question, question_data['correct_answer']
 
-    async def _evaluate_answer(self, question: str, user_answer: str, correct_answer: str):
+    async def _evaluate_answer(self, question: str, user_answer: str, correct_answer: str, pdf_files=None):
         """Evaluate the user's answer and return feedback."""
         content = f"Question: {question}\nStudent answered: {user_answer}\nCorrect answer: {correct_answer}"
 
         try:
             print("evaluating answer")
+            
+            contents = []
+            
+            # Add PDF files to the contents if available
+            if pdf_files:
+                for pdf_path in pdf_files:
+                    contents.append(
+                        types.Part.from_bytes(
+                            data=pathlib.Path(pdf_path).read_bytes(),
+                            mime_type='application/pdf',
+                        )
+                    )
+            
+            # Add the text content
+            contents.append(content)
+            
             response = self.client.models.generate_content(
                 model=MODEL,
-                contents=content,
+                contents=contents,
                 config={
                     'response_mime_type': 'application/json',
                     'response_schema': {
@@ -129,20 +164,49 @@ class StudyAgent:
             "question": None,
             "correct_answer": None,
             "question_history": [],  # Track previous questions and answers
-            "weak_areas": set()      # Track concepts user struggled with
+            "weak_areas": set(),     # Track concepts user struggled with
+            "pdf_files": []          # Store paths to saved PDF files
         }
         print("initialized state")
-        return "How can I help you learn today?"
+        return "How can I help you learn today? You can also send me PDF documents to study from."
+
+    async def _save_attachment(self, attachment, user_id):
+        """Save an attachment to disk and return the file path."""
+        # Create directory for user if it doesn't exist
+        user_dir = f"user_files/{user_id}"
+        os.makedirs(user_dir, exist_ok=True)
+        
+        # Generate a filename based on the attachment name
+        filename = attachment.filename
+        filepath = f"{user_dir}/{filename}"
+        
+        # Download and save the file
+        await attachment.save(filepath)
+        return filepath
 
     async def run(self, message: discord.Message):
         print("running on message", message.content)
         user_id = str(message.author.id)
         
         if user_id not in self.conversation_state:
-            return self._initialize_state(user_id)
+            self._initialize_state(user_id)
         
         state = self.conversation_state[user_id]
-
+        
+        # Handle attachments (PDFs)
+        if message.attachments:
+            pdf_files = []
+            for attachment in message.attachments:
+                if attachment.filename.lower().endswith('.pdf'):
+                    filepath = await self._save_attachment(attachment, user_id)
+                    state["pdf_files"].append(filepath)
+                    pdf_files.append(filepath)
+            
+            if pdf_files:
+                return f"I've received {len(pdf_files)} PDF document(s). I'll use these to help with your learning. What topic would you like to explore from these materials?"
+            else:
+                return "I can only process PDF files at the moment. Please send PDF documents."
+        
         # First check if this is a followup question or topic switch
         content = f"""User message: {message.content}
         Categorize the type of response the user gave.
@@ -152,9 +216,25 @@ class StudyAgent:
         """
         
         print("categorizing response")
+        
+        contents = []
+        
+        # Add PDF files to the contents if available
+        if state["pdf_files"]:
+            for pdf_path in state["pdf_files"]:
+                contents.append(
+                    types.Part.from_bytes(
+                        data=pathlib.Path(pdf_path).read_bytes(),
+                        mime_type='application/pdf',
+                    )
+                )
+        
+        # Add the text content
+        contents.append(content)
+        
         response = self.client.models.generate_content(
             model=MODEL,
-            contents=content,
+            contents=contents,
             config={
                 'response_mime_type': 'application/json',
                 'response_schema': {
@@ -195,7 +275,7 @@ class StudyAgent:
             state["weak_areas"] = set()
             if state["topic"]:
                 state["state"] = "asking_question"
-                state["question"], state["correct_answer"] = await self._generate_question(state["topic"])
+                state["question"], state["correct_answer"] = await self._generate_question(state["topic"], pdf_files=state["pdf_files"])
                 return state["question"]
             return "What new topic would you like to learn about?"
             
@@ -203,9 +283,25 @@ class StudyAgent:
             # User is asking a question about the topic
             content = f"Answer this question about {state['topic']}: {message.content}"
             print("responding to followup question")
+            
+            contents = []
+            
+            # Add PDF files to the contents if available
+            if state["pdf_files"]:
+                for pdf_path in state["pdf_files"]:
+                    contents.append(
+                        types.Part.from_bytes(
+                            data=pathlib.Path(pdf_path).read_bytes(),
+                            mime_type='application/pdf',
+                        )
+                    )
+            
+            # Add the text content
+            contents.append(content)
+            
             response = self.client.models.generate_content(
                 model=MODEL,
-                contents=content
+                contents=contents
             )
             return response.text
             
@@ -214,7 +310,7 @@ class StudyAgent:
             state["topic"] = message.content
             state["state"] = "asking_question"
             
-            state["question"], state["correct_answer"] = await self._generate_question(message.content)
+            state["question"], state["correct_answer"] = await self._generate_question(message.content, pdf_files=state["pdf_files"])
             return state["question"]
             
         elif state["state"] == "asking_question":
@@ -222,10 +318,10 @@ class StudyAgent:
             user_answer = message.content.strip().upper()
             correct_answer = state["correct_answer"].strip().upper()
             
-            eval_response = await self._evaluate_answer(state["question"], user_answer, correct_answer)
+            eval_response = await self._evaluate_answer(state["question"], user_answer, correct_answer, pdf_files=state["pdf_files"])
             
             if eval_response is None:
-                state["question"], state["correct_answer"] = await self._generate_question(state["topic"])
+                state["question"], state["correct_answer"] = await self._generate_question(state["topic"], pdf_files=state["pdf_files"])
                 return f"Sorry, I couldn't grade your response.\n\nHere's a new question:\n{state['question']}"
             
             is_correct = eval_response["correct"]
@@ -248,7 +344,8 @@ class StudyAgent:
             state["question"], state["correct_answer"] = await self._generate_question(
                 state["topic"], 
                 state["weak_areas"],
-                state["question_history"]
+                state["question_history"],
+                state["pdf_files"]
             )
             
             return f"{feedback}\n\nNext question:\n{state['question']}\n\nYou're welcome to ask me any followup questions or switch to another topic!"
