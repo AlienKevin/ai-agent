@@ -5,6 +5,8 @@ import discord
 import json
 import pathlib
 import httpx
+from enum import Enum, auto
+import re
 
 MODEL = "gemini-2.0-flash"
 
@@ -15,10 +17,28 @@ SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these 
 4. Continue with more questions on the same topic until they want to switch topics
 Keep track of their performance to adapt questions to their needs."""
 
+class UserState(Enum):
+    INITIAL = auto()
+    ASKING_QUESTION = auto()
+    AWAITING_ANSWER = auto()
+
+class Command(Enum):
+    ANSWER = "answer"
+    FOLLOWUP = "followup"
+    TOPIC = "topic"
+    UPLOAD = "upload"
+    NONE = "none"
+
 class StudyAgent:
     def __init__(self):
         self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.conversation_state = {}  # Track state per user
+        self.command_patterns = {
+            Command.ANSWER: r'!answer\s+([A-Ea-e])',
+            Command.FOLLOWUP: r'!followup\s+(.*)',
+            Command.TOPIC: r'!topic\s+(.*)',
+            Command.UPLOAD: r'!upload'
+        }
 
     async def _generate_question(self, topic: str, weak_areas=None, question_history=None, pdf_files=None):
         """Generate a multiple choice question about the given topic."""
@@ -49,6 +69,8 @@ class StudyAgent:
             model=MODEL,
             contents=contents,
             config={
+                "max_output_tokens": 500,  # Limit response size
+                "temperature": 0.7,
                 'response_mime_type': 'application/json',
                 'response_schema': {
                     "type": "object",
@@ -75,13 +97,17 @@ class StudyAgent:
                                 "D": {
                                     "type": "string",
                                     "description": "The fourth multiple choice option"
+                                },
+                                "E": {
+                                    "type": "string",
+                                    "description": "The fifth multiple choice option (optional)"
                                 }
                             },
                             "required": ["A", "B", "C", "D"]
                         },
                         "correct_answer": {
                             "type": "string",
-                            "enum": ["A", "B", "C", "D"]
+                            "enum": ["A", "B", "C", "D", "E"]
                         }
                     },
                     "required": ["question", "options", "correct_answer"]
@@ -101,6 +127,10 @@ class StudyAgent:
             f"C) {question_data['options']['C']}\n"
             f"D) {question_data['options']['D']}"
         )
+        
+        # Add option E if it exists
+        if 'E' in question_data['options']:
+            formatted_question += f"\nE) {question_data['options']['E']}"
         
         return formatted_question, question_data['correct_answer']
 
@@ -130,6 +160,8 @@ class StudyAgent:
                 model=MODEL,
                 contents=contents,
                 config={
+                    "max_output_tokens": 500,  # Limit response size
+                    "temperature": 0.7,
                     'response_mime_type': 'application/json',
                     'response_schema': {
                         "type": "object",
@@ -159,7 +191,7 @@ class StudyAgent:
     def _initialize_state(self, user_id: str):
         """Initialize conversation state for a new user."""
         self.conversation_state[user_id] = {
-            "state": "initial",
+            "state": UserState.INITIAL,
             "topic": None,
             "question": None,
             "correct_answer": None,
@@ -168,7 +200,13 @@ class StudyAgent:
             "pdf_files": []          # Store paths to saved PDF files
         }
         print("initialized state")
-        return "How can I help you learn today? You can also send me PDF documents to study from."
+        return (
+            "How can I help you learn today? You can use the following commands:\n"
+            "- `!topic [subject]` - Start learning about a specific topic\n"
+            "- `!answer [A/B/C/D/E]` - Answer the current question\n"
+            "- `!followup [question]` - Ask a followup question about the topic\n"
+            "- `!upload` - Upload PDF documents to study from (attach files with this command)"
+        )
 
     async def _save_attachment(self, attachment, user_id):
         """Save an attachment to disk and return the file path."""
@@ -183,169 +221,161 @@ class StudyAgent:
         # Download and save the file
         await attachment.save(filepath)
         return filepath
-
-    async def run(self, message: discord.Message):
-        print("running on message", message.content)
-        user_id = str(message.author.id)
         
-        if user_id not in self.conversation_state:
-            self._initialize_state(user_id)
-        
-        state = self.conversation_state[user_id]
-        
-        # Handle attachments (PDFs)
-        if message.attachments:
-            pdf_files = []
-            for attachment in message.attachments:
-                if attachment.filename.lower().endswith('.pdf'):
-                    filepath = await self._save_attachment(attachment, user_id)
-                    state["pdf_files"].append(filepath)
-                    pdf_files.append(filepath)
-            
-            if pdf_files:
-                return f"I've received {len(pdf_files)} PDF document(s). I'll use these to help with your learning. What topic would you like to explore from these materials?"
-            else:
-                return "I can only process PDF files at the moment. Please send PDF documents."
-        
-        # First check if this is a followup question or topic switch
-        content = f"""User message: {message.content}
-        Categorize the type of response the user gave.
-        1. An answer can be A, B, C, D, or expression of uncertainty like not sure.
-        2. A followup question is if the user is asking a question about the topic.
-        3. A switch topic is if the user wants to learn about a new topic.
-        """
-        
-        print("categorizing response")
-        
-        contents = []
-        
-        # Add PDF files to the contents if available
-        if state["pdf_files"]:
-            for pdf_path in state["pdf_files"]:
+    async def _add_pdf_contents(self, contents, pdf_files):
+        """Helper method to add PDF files to contents list"""
+        if pdf_files:
+            for pdf_path in pdf_files:
                 contents.append(
                     types.Part.from_bytes(
                         data=pathlib.Path(pdf_path).read_bytes(),
                         mime_type='application/pdf',
                     )
                 )
+        return contents
+    
+    def _parse_command(self, message_content):
+        """Parse the message to identify commands and their arguments"""
+        for command, pattern in self.command_patterns.items():
+            match = re.match(pattern, message_content, re.IGNORECASE)
+            if match:
+                if command == Command.ANSWER:
+                    return command, match.group(1).upper()
+                elif command in [Command.FOLLOWUP, Command.TOPIC]:
+                    return command, match.group(1)
+                else:  # Command.UPLOAD
+                    return command, None
         
-        # Add the text content
+        return Command.NONE, message_content
+        
+    async def _handle_followup_question(self, question, topic, pdf_files=None):
+        """Handle a followup question from the user"""
+        content = f"Answer this question about {topic}: {question}"
+        print("responding to followup question")
+        
+        contents = []
+        contents = await self._add_pdf_contents(contents, pdf_files)
         contents.append(content)
         
         response = self.client.models.generate_content(
             model=MODEL,
             contents=contents,
             config={
-                'response_mime_type': 'application/json',
-                'response_schema': {
-                    "type": "object",
-                    "properties": {
-                        "response_type": {
-                            "type": "string", 
-                            "enum": ["answer", "followup_question", "switch_topic"],
-                        },
-                        "new_topic": {
-                            "type": "string",
-                            "description": "The new topic the user wants to learn about (if applicable)"
-                        }
-                    },
-                    "required": ["response_type", "new_topic"]
-                }
+                "max_output_tokens": 800,  # Limit response to fit in Discord's message limit
+                "temperature": 0.7
             }
         )
         
-        try:
-            msg_type = json.loads(response.text)
-            
-            # Validate the response format
-            if not ("response_type" in msg_type and 
-                   msg_type["response_type"] in ["answer", "followup_question", "switch_topic"] and
-                   "new_topic" in msg_type):
-                print("Invalid response format: ", response.text)
-                msg_type = {"response_type": "answer", "new_topic": None}
-        except json.JSONDecodeError:
-            print("Failed to parse response: ", response.text) 
-            msg_type = {"response_type": "answer", "new_topic": None}
-
-        print("msg_type", msg_type)
+        return response.text
         
-        if msg_type["response_type"] == "switch_topic":
-            state["state"] = "initial"
-            state["topic"] = msg_type["new_topic"] if msg_type["new_topic"] else None
-            state["weak_areas"] = set()
-            if state["topic"]:
-                state["state"] = "asking_question"
-                state["question"], state["correct_answer"] = await self._generate_question(state["topic"], pdf_files=state["pdf_files"])
-                return state["question"]
-            return "What new topic would you like to learn about?"
-            
-        if msg_type["response_type"] == "followup_question":
-            # User is asking a question about the topic
-            content = f"Answer this question about {state['topic']}: {message.content}"
-            print("responding to followup question")
-            
-            contents = []
-            
-            # Add PDF files to the contents if available
-            if state["pdf_files"]:
-                for pdf_path in state["pdf_files"]:
-                    contents.append(
-                        types.Part.from_bytes(
-                            data=pathlib.Path(pdf_path).read_bytes(),
-                            mime_type='application/pdf',
-                        )
-                    )
-            
-            # Add the text content
-            contents.append(content)
-            
-            response = self.client.models.generate_content(
-                model=MODEL,
-                contents=contents
-            )
-            return response.text
-            
-        if state["state"] == "initial":
-            # User is providing the topic
-            state["topic"] = message.content
-            state["state"] = "asking_question"
-            
-            state["question"], state["correct_answer"] = await self._generate_question(message.content, pdf_files=state["pdf_files"])
+    async def _handle_topic_switch(self, state, new_topic):
+        """Handle a topic switch from the user"""
+        state["state"] = UserState.INITIAL
+        state["topic"] = new_topic if new_topic else None
+        state["weak_areas"] = set()
+        
+        if state["topic"]:
+            state["state"] = UserState.ASKING_QUESTION
+            state["question"], state["correct_answer"] = await self._generate_question(state["topic"], pdf_files=state["pdf_files"])
             return state["question"]
+        return "What new topic would you like to learn about? Use `!topic [subject]`"
+        
+    async def _handle_initial_state(self, message_content, state):
+        """Handle the initial state when user is providing a topic"""
+        state["topic"] = message_content
+        state["state"] = UserState.ASKING_QUESTION
+        
+        state["question"], state["correct_answer"] = await self._generate_question(message_content, pdf_files=state["pdf_files"])
+        return state["question"]
+        
+    async def _handle_question_answer(self, user_answer, state):
+        """Handle when user is answering a question"""
+        correct_answer = state["correct_answer"].strip().upper()
+        
+        eval_response = await self._evaluate_answer(state["question"], user_answer, correct_answer, pdf_files=state["pdf_files"])
+        
+        if eval_response is None:
+            state["question"], state["correct_answer"] = await self._generate_question(state["topic"], pdf_files=state["pdf_files"])
+            return f"Sorry, I couldn't grade your response.\n\nHere's a new question:\n{state['question']}"
+        
+        is_correct = eval_response["correct"]
+        concept = eval_response["concept"]
+        feedback = eval_response["feedback"]
+        
+        # Update history and weak areas
+        state["question_history"].append({
+            "question": state["question"],
+            "user_answer": user_answer,
+            "correct_answer": correct_answer,
+            "concept": concept,
+            "is_correct": is_correct
+        })
+        
+        if not is_correct:
+            state["weak_areas"].add(concept)
+        
+        # Generate next question focusing on weak areas
+        state["question"], state["correct_answer"] = await self._generate_question(
+            state["topic"], 
+            state["weak_areas"],
+            state["question_history"],
+            state["pdf_files"]
+        )
+        
+        return f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` to answer, `!followup [question]` to ask a followup, or `!topic [subject]` to switch topics."
+
+    async def _handle_pdf_attachments(self, message):
+        """Handle PDF attachments from the user"""
+        user_id = str(message.author.id)
+        state = self.conversation_state[user_id]
+        pdf_files = []
+        
+        for attachment in message.attachments:
+            if attachment.filename.lower().endswith('.pdf'):
+                filepath = await self._save_attachment(attachment, user_id)
+                state["pdf_files"].append(filepath)
+                pdf_files.append(filepath)
+        
+        if pdf_files:
+            return f"I've received {len(pdf_files)} PDF document(s). I'll use these to help with your learning. Use `!topic [subject]` to start learning about a specific topic from these materials."
+        else:
+            return "I can only process PDF files at the moment. Please send PDF documents with the `!upload` command."
+
+    async def run(self, message: discord.Message):
+        print("running on message", message.content)
+        user_id = str(message.author.id)
+        
+        if user_id not in self.conversation_state:
+            return self._initialize_state(user_id)
+        
+        state = self.conversation_state[user_id]
+        
+        # Parse the command from the message
+        command, argument = self._parse_command(message.content)
+        
+        # Handle attachments with !upload command
+        if command == Command.UPLOAD or (command == Command.NONE and message.attachments):
+            return await self._handle_pdf_attachments(message)
+        
+        # Handle commands based on type
+        if command == Command.TOPIC:
+            return await self._handle_topic_switch(state, argument)
             
-        elif state["state"] == "asking_question":
-            # User is answering the question
-            user_answer = message.content.strip().upper()
-            correct_answer = state["correct_answer"].strip().upper()
+        if command == Command.FOLLOWUP:
+            if state["topic"]:
+                return await self._handle_followup_question(argument, state["topic"], state["pdf_files"])
+            else:
+                return "Please set a topic first using `!topic [subject]`"
             
-            eval_response = await self._evaluate_answer(state["question"], user_answer, correct_answer, pdf_files=state["pdf_files"])
-            
-            if eval_response is None:
-                state["question"], state["correct_answer"] = await self._generate_question(state["topic"], pdf_files=state["pdf_files"])
-                return f"Sorry, I couldn't grade your response.\n\nHere's a new question:\n{state['question']}"
-            
-            is_correct = eval_response["correct"]
-            concept = eval_response["concept"]
-            feedback = eval_response["feedback"]
-            
-            # Update history and weak areas
-            state["question_history"].append({
-                "question": state["question"],
-                "user_answer": user_answer,
-                "correct_answer": correct_answer,
-                "concept": concept,
-                "is_correct": is_correct
-            })
-            
-            if not is_correct:
-                state["weak_areas"].add(concept)
-            
-            # Generate next question focusing on weak areas
-            state["question"], state["correct_answer"] = await self._generate_question(
-                state["topic"], 
-                state["weak_areas"],
-                state["question_history"],
-                state["pdf_files"]
-            )
-            
-            return f"{feedback}\n\nNext question:\n{state['question']}\n\nYou're welcome to ask me any followup questions or switch to another topic!"
+        if command == Command.ANSWER:
+            if state["state"] == UserState.ASKING_QUESTION:
+                return await self._handle_question_answer(argument, state)
+            else:
+                return "There's no active question to answer. Use `!topic [subject]` to start a new topic."
+        
+        # Handle regular messages (no command)
+        if state["state"] == UserState.INITIAL:
+            return await self._handle_initial_state(message.content, state)
+        elif state["state"] == UserState.ASKING_QUESTION:
+            # Treat as a regular message - suggest using commands
+            return "I didn't recognize that as a command. Please use `!answer [A/B/C/D/E]` to answer the question, `!followup [question]` to ask a followup, or `!topic [subject]` to switch topics."
