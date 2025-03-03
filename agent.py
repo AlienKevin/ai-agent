@@ -49,7 +49,7 @@ class StudyAgent:
         self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.conversation_state = {}  # Track state per user
         self.command_patterns = {
-            Command.ANSWER: r'!answer\s+([A-Ea-e]|not sure)',
+            Command.ANSWER: r'!answer\s+([A-Ea-e](?:[,\s]+[A-Ea-e])*|not sure)',
             Command.QUESTION: r'!question\s+(.*)',
             Command.TOPIC: r'!topic\s+(.*)',
             Command.UPLOAD: r'!upload'
@@ -121,7 +121,13 @@ class StudyAgent:
             if incorrect_questions:
                 content += f"\n\nThe student has struggled with these previous questions (focus on similar concepts):"
                 for i, q in enumerate(incorrect_questions[-3:]):  # Show last 3 incorrect questions
-                    content += f"\n{i+1}. Question: {q['question']}\n   User answered: {q['user_answer']}\n   Correct answer: {q['correct_answer']}"
+                    # Handle both old format (correct_answer) and new format (correct_answers)
+                    if "correct_answer" in q:
+                        correct_ans_display = q["correct_answer"]
+                    else:
+                        correct_ans_display = ", ".join(q["correct_answers"]) if isinstance(q["correct_answers"], list) else q["correct_answers"]
+                    
+                    content += f"\n{i+1}. Question: {q['question']}\n   User answered: {q['user_answer']}\n   Correct answer: {correct_ans_display}"
             
             # Avoid repeating questions
             content += "\n\nAvoid creating questions that are too similar to these previous questions:"
@@ -185,9 +191,17 @@ class StudyAgent:
                             },
                             "required": ["A", "B", "C", "D"]
                         },
-                        "correct_answer": {
-                            "type": "string",
-                            "enum": ["A", "B", "C", "D", "E"]
+                        "correct_answers": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["A", "B", "C", "D", "E"]
+                            },
+                            "description": "The correct answer(s). Can be a single letter or multiple letters if more than one answer is correct."
+                        },
+                        "multiple_answers_allowed": {
+                            "type": "boolean",
+                            "description": "Whether this question allows multiple correct answers"
                         },
                         "concept_tested": {
                             "type": "string",
@@ -198,7 +212,7 @@ class StudyAgent:
                             "description": "If from an uploaded document, mention which document or slide this question is based on"
                         }
                     },
-                    "required": ["question", "options", "correct_answer", "concept_tested"]
+                    "required": ["question", "options", "correct_answers", "multiple_answers_allowed", "concept_tested"]
                 }
             }
         )
@@ -207,9 +221,17 @@ class StudyAgent:
 
         question_data = json.loads(response.text)
         
+        # Check if this is a multiple-answer question
+        is_multiple_answer = question_data.get('multiple_answers_allowed', False) or len(question_data['correct_answers']) > 1
+        
+        # Add instruction for multiple answers if applicable
+        multiple_answer_instruction = ""
+        if is_multiple_answer:
+            multiple_answer_instruction = " (Select ALL that apply)"
+        
         # Format the question text with options
         formatted_question = (
-            f"{question_data['question']}\n\n"
+            f"{question_data['question']}{multiple_answer_instruction}\n\n"
             f"A) {question_data['options']['A']}\n"
             f"B) {question_data['options']['B']}\n"
             f"C) {question_data['options']['C']}\n"
@@ -227,29 +249,45 @@ class StudyAgent:
         # Extract the concept being tested
         concept_tested = question_data.get('concept_tested', 'Unknown')
         
-        # Return the formatted question, correct answer, and concept tested
-        return formatted_question, question_data['correct_answer'], concept_tested
+        # Return the formatted question, correct answers, and concept tested
+        return formatted_question, question_data['correct_answers'], concept_tested
 
-    async def _evaluate_answer(self, question: str, user_answer: str, correct_answer: str, pdf_files=None):
+    async def _evaluate_answer(self, question: str, user_answer: str, correct_answers: list, pdf_files=None):
         """Evaluate the user's answer and return feedback."""
         # Extract the question text and options
         question_parts = question.split("\n\n")
         question_text = question_parts[0]
         options = question_parts[1].split("\n")
         
-        # Find the correct option text
-        correct_option_text = ""
-        user_option_text = ""
-        for option in options:
-            if option.startswith(f"{correct_answer})"):
-                correct_option_text = option[3:].strip()
-            if option.startswith(f"{user_answer})"):
-                user_option_text = option[3:].strip()
+        # Format correct answers for display
+        if len(correct_answers) == 1:
+            correct_answers_display = correct_answers[0]
+        else:
+            correct_answers_display = ", ".join(sorted(correct_answers))
+        
+        # Find the correct option text for all correct answers
+        correct_options_text = []
+        for correct_answer in correct_answers:
+            for option in options:
+                if option.startswith(f"{correct_answer})"):
+                    correct_options_text.append(f"{correct_answer}) {option[3:].strip()}")
+                    break
+        
+        # Find the user's option text(s)
+        user_options_text = []
+        user_answers = user_answer.split(", ")
+        for user_ans in user_answers:
+            for option in options:
+                if option.startswith(f"{user_ans})"):
+                    user_options_text.append(f"{user_ans}) {option[3:].strip()}")
+                    break
         
         # Prepare the content for evaluation
         content = f"""Question: {question_text}
-Student answered: {user_answer}) {user_option_text}
-Correct answer: {correct_answer}) {correct_option_text}
+Student answered: {user_answer} ({"; ".join(user_options_text)})
+Correct answer{'s' if len(correct_answers) > 1 else ''}: {correct_answers_display}
+Correct option{'s' if len(correct_answers) > 1 else ''}:
+{chr(10).join([f"- {text}" for text in correct_options_text])}
 
 Evaluate the student's answer and provide detailed feedback."""
 
@@ -328,7 +366,7 @@ Evaluate the student's answer and provide detailed feedback."""
             "state": UserState.INITIAL,
             "topic": None,
             "question": None,
-            "correct_answer": None,
+            "correct_answers": [],
             "question_history": [],  # Track previous questions and answers
             "pdf_files": pdf_files   # Store paths to saved PDF files
         }
@@ -347,7 +385,8 @@ Evaluate the student's answer and provide detailed feedback."""
         return (
             "How can I help you learn today? You can use the following commands:\n"
             "- `!topic [subject]` - Start learning about a specific topic\n"
-            "- `!answer [A/B/C/D/E]` or `!answer not sure` - Answer the current question\n"
+            "- `!answer [letter]` or `!answer [letters]` - Answer the current question (e.g., `!answer A` or `!answer A,B,C` for multiple answers)\n"
+            "- `!answer not sure` - Skip the current question if you don't know the answer\n"
             "- `!question [question]` - Ask any question about the topic\n"
             "- `!upload` - Upload PDF documents to study from (attach files with this command)"
             f"{pdf_message}"
@@ -385,16 +424,32 @@ Evaluate the student's answer and provide detailed feedback."""
             match = re.match(pattern, message_content, re.IGNORECASE)
             if match:
                 if command == Command.ANSWER:
-                    answer = match.group(1).strip().upper()
+                    answer_text = match.group(1).strip().upper()
                     # Handle "not sure" case
-                    if re.match(r'NOT\s*SURE', answer, re.IGNORECASE):
+                    if re.match(r'NOT SURE', answer_text, re.IGNORECASE):
                         return command, "NOT SURE"
-                    return command, answer
+                    
+                    # Handle multiple answers (e.g., "A,B,C" or "A B C" or "A, B, C")
+                    if ',' in answer_text or ' ' in answer_text:
+                        # Split by comma or space and clean up
+                        answers = re.split(r'[,\s]+', answer_text)
+                        # Filter out empty strings and sort
+                        answers = sorted([a.strip() for a in answers if a.strip()])
+                        # Validate each answer is a valid option
+                        valid_answers = [a for a in answers if re.match(r'^[A-E]$', a)]
+                        if valid_answers:
+                            return command, valid_answers
+                        return command, "INVALID"
+                    
+                    # Single answer
+                    if re.match(r'^[A-E]$', answer_text):
+                        return command, answer_text
+                    return command, "INVALID"
+                    
                 elif command in [Command.QUESTION, Command.TOPIC]:
                     return command, match.group(1)
                 else:  # Command.UPLOAD
                     return command, None
-        
         return Command.NONE, message_content
         
     async def _handle_question(self, question, topic, pdf_files=None):
@@ -424,7 +479,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         if state["topic"]:
             state["state"] = UserState.ASKING_QUESTION
-            state["question"], state["correct_answer"], _ = await self._generate_question(state["topic"], question_history=None, pdf_files=state["pdf_files"])
+            state["question"], state["correct_answers"], _ = await self._generate_question(state["topic"], question_history=None, pdf_files=state["pdf_files"])
             return state["question"]
         return "What new topic would you like to learn about? Use `!topic [subject]`"
         
@@ -433,7 +488,7 @@ Evaluate the student's answer and provide detailed feedback."""
         state["topic"] = message_content
         state["state"] = UserState.ASKING_QUESTION
         
-        state["question"], state["correct_answer"], _ = await self._generate_question(message_content, question_history=None, pdf_files=state["pdf_files"])
+        state["question"], state["correct_answers"], _ = await self._generate_question(message_content, question_history=None, pdf_files=state["pdf_files"])
         return state["question"]
         
     async def _handle_question_answer(self, user_answer, state):
@@ -441,23 +496,34 @@ Evaluate the student's answer and provide detailed feedback."""
         # Handle "not sure" response
         if user_answer == "NOT SURE":
             # Generate feedback for "not sure" response
-            correct_answer = state["correct_answer"].strip().upper()
-            feedback = f"The correct answer is {correct_answer}. Let me explain:\n\n"
+            correct_answers = state["correct_answers"]
+            
+            # Format correct answers for display
+            if len(correct_answers) == 1:
+                correct_answers_display = correct_answers[0]
+            else:
+                correct_answers_display = ", ".join(correct_answers)
+            
+            feedback = f"The correct answer{'s' if len(correct_answers) > 1 else ''} {'are' if len(correct_answers) > 1 else 'is'}: {correct_answers_display}. Let me explain:\n\n"
             
             # Add explanation based on the options
             question_parts = state["question"].split("\n\n")
             question_text = question_parts[0]
             options = question_parts[1].split("\n")
             
-            # Find the correct option text
-            correct_option_text = ""
-            for option in options:
-                if option.startswith(f"{correct_answer})"):
-                    correct_option_text = option[3:].strip()
-                    break
+            # Find the correct option text for all correct answers
+            correct_options_text = []
+            for correct_answer in correct_answers:
+                for option in options:
+                    if option.startswith(f"{correct_answer})"):
+                        correct_options_text.append(f"{correct_answer}) {option[3:].strip()}")
+                        break
             
             # Generate an explanation
-            content = f"Question: {question_text}\nCorrect answer: {correct_answer}) {correct_option_text}\nExplain why this is correct."
+            content = f"Question: {question_text}\nCorrect answer{'s' if len(correct_answers) > 1 else ''}: {correct_answers_display}\n"
+            for option_text in correct_options_text:
+                content += f"- {option_text}\n"
+            content += "\nExplain why these are correct."
             
             contents = []
             contents = await self._add_pdf_contents(contents, state["pdf_files"])
@@ -492,37 +558,53 @@ Evaluate the student's answer and provide detailed feedback."""
             state["question_history"].append({
                 "question": state["question"],
                 "user_answer": "NOT SURE",
-                "correct_answer": correct_answer,
+                "correct_answers": correct_answers,
                 "concept": concept,
                 "is_correct": False
             })
             
             # Generate next question
-            state["question"], state["correct_answer"], concept_tested = await self._generate_question(
+            state["question"], state["correct_answers"], concept_tested = await self._generate_question(
                 state["topic"], 
                 state["question_history"],
                 state["pdf_files"]
             )
             
             # Prepare response text
-            response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+            response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
             
             # Truncate if too long for Discord
             if len(response_text) > 1900:  # Leave some buffer
                 # Truncate the feedback part while preserving the question and instructions
-                max_feedback_length = 1900 - len(f"\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics.")
+                max_feedback_length = 1900 - len(f"\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know.")
                 truncated_feedback = feedback[:max_feedback_length] + "... (feedback truncated)"
-                response_text = f"{truncated_feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+                response_text = f"{truncated_feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
             
             return response_text
         
-        # Handle regular answer
-        correct_answer = state["correct_answer"].strip().upper()
+        # Handle invalid answer
+        if user_answer == "INVALID":
+            return f"Invalid answer format. Please use `!answer [letter]` (e.g., `!answer A`) or `!answer [letters]` (e.g., `!answer A,B,C`) or `!answer not sure`.\n\nThe current question is:\n{state['question']}"
         
-        eval_response = await self._evaluate_answer(state["question"], user_answer, correct_answer, pdf_files=state["pdf_files"])
+        # Handle regular answer
+        correct_answers = state["correct_answers"]
+        
+        # Check if this is a multiple-answer question
+        is_multiple_answer = len(correct_answers) > 1
+        
+        # Convert user_answer to list if it's a string (single answer)
+        user_answers = user_answer if isinstance(user_answer, list) else [user_answer]
+        
+        # Prepare user answer display for evaluation
+        if len(user_answers) == 1:
+            user_answer_display = user_answers[0]
+        else:
+            user_answer_display = ", ".join(sorted(user_answers))
+        
+        eval_response = await self._evaluate_answer(state["question"], user_answer_display, correct_answers, pdf_files=state["pdf_files"])
         
         if eval_response is None:
-            state["question"], state["correct_answer"], _ = await self._generate_question(state["topic"], question_history=state["question_history"], pdf_files=state["pdf_files"])
+            state["question"], state["correct_answers"], _ = await self._generate_question(state["topic"], question_history=state["question_history"], pdf_files=state["pdf_files"])
             return f"Sorry, I couldn't grade your response.\n\nHere's a new question:\n{state['question']}"
         
         is_correct = eval_response["correct"]
@@ -532,28 +614,34 @@ Evaluate the student's answer and provide detailed feedback."""
         # Update history
         state["question_history"].append({
             "question": state["question"],
-            "user_answer": user_answer,
-            "correct_answer": correct_answer,
+            "user_answer": user_answer_display,
+            "correct_answers": correct_answers,
             "concept": concept,
             "is_correct": is_correct
         })
         
         # Generate next question focusing on weak areas
-        state["question"], state["correct_answer"], concept_tested = await self._generate_question(
+        state["question"], state["correct_answers"], concept_tested = await self._generate_question(
             state["topic"], 
             state["question_history"],
             state["pdf_files"]
         )
+        # Add information about multiple answers if applicable
+        multiple_answers_text = ""
+        if len(state["correct_answers"]) > 1:
+            multiple_answers_text = " (This question has multiple correct answers. Use `!answer A,B,C` format to select multiple options)"
         
         # Prepare response text
-        response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
-        
+        if len(state["correct_answers"]) > 1:
+            response_text = f"{feedback}\n\nNext question{multiple_answers_text}:\n{state['question']}\n\nUse `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
+        else:
+            response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, or `!answer not sure` if you don't know."
         # Truncate if too long for Discord
         if len(response_text) > 1900:  # Leave some buffer
             # Truncate the feedback part while preserving the question and instructions
-            max_feedback_length = 1900 - len(f"\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics.")
+            max_feedback_length = 1900 - len(f"\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know.")
             truncated_feedback = feedback[:max_feedback_length] + "... (feedback truncated)"
-            response_text = f"{truncated_feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+            response_text = f"{truncated_feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
         
         return response_text
 
