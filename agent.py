@@ -12,10 +12,25 @@ MODEL = "gemini-2.0-flash"
 
 SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these steps:
 1. If the user hasn't specified a topic yet, ask them what topic they want to learn about
-2. Generate multiple choice questions to test their understanding, focusing on areas they struggled with previously
+2. Generate multiple choice questions to test their understanding, with these priorities:
+   a) Focus on areas they've struggled with in previous questions
+   b) Ensure comprehensive coverage of all parts of the specified topic
+   c) Systematically explore different aspects of the topic, even those not yet tested
 3. When they answer, grade their response and provide helpful feedback
 4. Continue with more questions on the same topic until they want to switch topics
-Keep track of their performance to adapt questions to their needs."""
+5. Always ground your questions and answers in the uploaded documents (PDF files) if available - these may be past exams, lecture slides, or textbook content
+6. Prioritize content from the uploaded documents when creating questions
+7. Make sure to cover ALL parts of the topic mentioned in the uploaded documents
+
+⚠️ CRITICAL REQUIREMENT: CREATE FULLY SELF-CONTAINED QUESTIONS ⚠️
+- All questions MUST be completely self-contained in text form
+- NEVER reference figures, images, diagrams, or visual elements that cannot be fully described in text
+- If the document contains visual elements, either fully describe them in text or avoid questions that depend on them
+- Users should NEVER need to look at the original documents to understand or answer questions
+- NEVER say "refer to figure X" or "as shown in the diagram" or similar phrases
+- If a concept relies heavily on visual elements that cannot be adequately described in text, choose a different concept to test
+
+Keep track of their performance through question history to adapt questions to their needs. Your goal is to help them master difficult concepts while ensuring comprehensive coverage of the entire topic."""
 
 class UserState(Enum):
     INITIAL = auto()
@@ -40,13 +55,78 @@ class StudyAgent:
             Command.UPLOAD: r'!upload'
         }
 
-    async def _generate_question(self, topic: str, weak_areas=None, question_history=None, pdf_files=None):
+    async def _generate_question(self, topic: str, question_history=None, pdf_files=None):
         """Generate a multiple choice question about the given topic."""
-        content = f"Generate a multiple choice question about {topic}."
-        if weak_areas:
-            content += f"\nFocus on these weak areas if possible: {list(weak_areas)}"
+        # Base prompt
+        content = f"Generate a challenging multiple choice question about {topic}."
+        
+        # Track covered concepts and identify weak areas from question history
+        covered_concepts = set()
+        weak_concepts = {}
+        
         if question_history:
-            content += f"\nPrevious questions: {question_history}"
+            for q in question_history:
+                if 'concept' in q and q['concept'] != 'Unknown':
+                    covered_concepts.add(q['concept'])
+                    # Track concepts the user got wrong
+                    if not q.get('is_correct', True):
+                        weak_concepts[q['concept']] = weak_concepts.get(q['concept'], 0) + 1
+        
+        # Determine question strategy based on history
+        if question_history and len(question_history) > 0:
+            # Every third question should explore a new aspect of the topic
+            if len(question_history) % 3 == 0:
+                content = f"Generate a challenging multiple choice question about {topic} that explores an aspect or concept NOT covered in previous questions. Focus on comprehensive coverage of the topic."
+            # Otherwise, focus on weak areas if available
+            elif weak_concepts:
+                # Sort weak concepts by frequency (most frequently wrong first)
+                sorted_weak_concepts = sorted(weak_concepts.items(), key=lambda x: x[1], reverse=True)
+                weak_concepts_list = [concept for concept, count in sorted_weak_concepts[:3]]
+                content = f"Generate a challenging multiple choice question about {topic} that focuses specifically on these concepts: {weak_concepts_list}. These are areas where the student has shown weakness, so it's important to test them on these concepts."
+            # If no weak areas or it's not time for a new concept, use general question
+            else:
+                content = f"Generate a challenging multiple choice question about {topic} that tests an important concept within this subject."
+        
+        # Add context about document usage and comprehensive coverage
+        if pdf_files and len(pdf_files) > 0:
+            content += f"\n\nIMPORTANT: Base your question on content from the uploaded documents. These may be lecture slides, past exams, or textbook content. Extract specific concepts, examples, or problems from these materials to create an authentic question."
+            
+            # Add information about the number of documents
+            content += f"\n\nThe student has uploaded {len(pdf_files)} document(s). Use these as your primary source for creating questions."
+            
+            # Emphasize comprehensive coverage
+            content += f"\n\nEnsure you cover ALL parts of {topic} mentioned in the documents. If you've already covered some concepts in previous questions, try to explore different aspects of the topic."
+            
+            # Emphasize self-contained questions
+            content += f"""\n\n⚠️ CRITICAL REQUIREMENT: CREATE FULLY SELF-CONTAINED QUESTIONS ⚠️
+1. Questions MUST be completely self-contained in text form
+2. DO NOT create questions that reference figures, images, diagrams, or visual elements from the documents
+3. If you need to reference content that appears in a figure or diagram, fully describe it in text within your question
+4. The user should NEVER need to look at the original document to understand or answer the question
+5. If a concept relies heavily on visual elements that cannot be adequately described in text, choose a different concept to test
+6. NEVER say "refer to figure X" or "as shown in the diagram" or similar phrases"""
+        
+        # Add information about covered concepts
+        if covered_concepts:
+            content += f"\n\nConcepts already covered in previous questions: {list(covered_concepts)}."
+        
+        # Add information about weak concepts
+        if weak_concepts:
+            content += f"\n\nThe student has struggled with these concepts (consider focusing on them): {list(weak_concepts.keys())}."
+        
+        # Add question history context if available
+        if question_history and len(question_history) > 0:
+            # Extract concepts the user got wrong
+            incorrect_questions = [q for q in question_history if not q.get("is_correct", False)]
+            if incorrect_questions:
+                content += f"\n\nThe student has struggled with these previous questions (focus on similar concepts):"
+                for i, q in enumerate(incorrect_questions[-3:]):  # Show last 3 incorrect questions
+                    content += f"\n{i+1}. Question: {q['question']}\n   User answered: {q['user_answer']}\n   Correct answer: {q['correct_answer']}"
+            
+            # Avoid repeating questions
+            content += "\n\nAvoid creating questions that are too similar to these previous questions:"
+            for i, q in enumerate(question_history[-5:]):  # Last 5 questions
+                content += f"\n{i+1}. {q['question']}"
 
         print("generating question")
         
@@ -77,7 +157,7 @@ class StudyAgent:
                     "properties": {
                         "question": {
                             "type": "string",
-                            "description": "The multiple choice question text"
+                            "description": "The multiple choice question text. Must be completely self-contained and not reference any figures, images, or diagrams that aren't fully described in text."
                         },
                         "options": {
                             "type": "object",
@@ -108,9 +188,17 @@ class StudyAgent:
                         "correct_answer": {
                             "type": "string",
                             "enum": ["A", "B", "C", "D", "E"]
+                        },
+                        "concept_tested": {
+                            "type": "string",
+                            "description": "The specific concept or knowledge area being tested in this question"
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "If from an uploaded document, mention which document or slide this question is based on"
                         }
                     },
-                    "required": ["question", "options", "correct_answer"]
+                    "required": ["question", "options", "correct_answer", "concept_tested"]
                 }
             }
         )
@@ -132,11 +220,38 @@ class StudyAgent:
         if 'E' in question_data['options']:
             formatted_question += f"\nE) {question_data['options']['E']}"
         
-        return formatted_question, question_data['correct_answer']
+        # Add source information if available
+        if 'source' in question_data and question_data['source']:
+            formatted_question += f"\n\n(Source: {question_data['source']})"
+        
+        # Extract the concept being tested
+        concept_tested = question_data.get('concept_tested', 'Unknown')
+        
+        # Return the formatted question, correct answer, and concept tested
+        return formatted_question, question_data['correct_answer'], concept_tested
 
     async def _evaluate_answer(self, question: str, user_answer: str, correct_answer: str, pdf_files=None):
         """Evaluate the user's answer and return feedback."""
-        content = f"Question: {question}\nStudent answered: {user_answer}\nCorrect answer: {correct_answer}"
+        # Extract the question text and options
+        question_parts = question.split("\n\n")
+        question_text = question_parts[0]
+        options = question_parts[1].split("\n")
+        
+        # Find the correct option text
+        correct_option_text = ""
+        user_option_text = ""
+        for option in options:
+            if option.startswith(f"{correct_answer})"):
+                correct_option_text = option[3:].strip()
+            if option.startswith(f"{user_answer})"):
+                user_option_text = option[3:].strip()
+        
+        # Prepare the content for evaluation
+        content = f"""Question: {question_text}
+Student answered: {user_answer}) {user_option_text}
+Correct answer: {correct_answer}) {correct_option_text}
+
+Evaluate the student's answer and provide detailed feedback."""
 
         try:
             print("evaluating answer")
@@ -172,20 +287,31 @@ class StudyAgent:
                             },
                             "concept": {
                                 "type": "string",
-                                "description": "The specific concept being tested"
+                                "description": "The specific concept being tested (be precise and specific, 1-5 words)"
                             },
                             "feedback": {
                                 "type": "string", 
-                                "description": "Detailed explanation and feedback"
+                                "description": "Detailed explanation and feedback that helps the student understand why their answer was right or wrong"
+                            },
+                            "improvement_suggestion": {
+                                "type": "string",
+                                "description": "A specific suggestion to help the student improve their understanding of this concept"
                             }
                         },
-                        "required": ["correct", "concept", "feedback"]
+                        "required": ["correct", "concept", "feedback", "improvement_suggestion"]
                     }
                 }
             )
-            return json.loads(response.text)
-        except:
-            print(response)
+            
+            result = json.loads(response.text)
+            
+            # Combine feedback with improvement suggestion
+            result["feedback"] = f"{result['feedback']}\n\n{result['improvement_suggestion']}"
+            
+            return result
+        except Exception as e:
+            print(f"Error evaluating answer: {e}")
+            print(f"Response: {response if 'response' in locals() else 'No response'}")
             return None
 
     def _initialize_state(self, user_id: str):
@@ -204,7 +330,6 @@ class StudyAgent:
             "question": None,
             "correct_answer": None,
             "question_history": [],  # Track previous questions and answers
-            "weak_areas": set(),     # Track concepts user struggled with
             "pdf_files": pdf_files   # Store paths to saved PDF files
         }
         
@@ -296,11 +421,10 @@ class StudyAgent:
         """Handle a topic switch from the user"""
         state["state"] = UserState.INITIAL
         state["topic"] = new_topic if new_topic else None
-        state["weak_areas"] = set()
         
         if state["topic"]:
             state["state"] = UserState.ASKING_QUESTION
-            state["question"], state["correct_answer"] = await self._generate_question(state["topic"], pdf_files=state["pdf_files"])
+            state["question"], state["correct_answer"], _ = await self._generate_question(state["topic"], question_history=None, pdf_files=state["pdf_files"])
             return state["question"]
         return "What new topic would you like to learn about? Use `!topic [subject]`"
         
@@ -309,7 +433,7 @@ class StudyAgent:
         state["topic"] = message_content
         state["state"] = UserState.ASKING_QUESTION
         
-        state["question"], state["correct_answer"] = await self._generate_question(message_content, pdf_files=state["pdf_files"])
+        state["question"], state["correct_answer"], _ = await self._generate_question(message_content, question_history=None, pdf_files=state["pdf_files"])
         return state["question"]
         
     async def _handle_question_answer(self, user_answer, state):
@@ -350,19 +474,32 @@ class StudyAgent:
             
             feedback += response.text
             
+            # Identify the concept being tested
+            concept_prompt = f"Based on this question, what specific concept is being tested?\nQuestion: {question_text}\n\nProvide a short, specific concept name (1-5 words)."
+            
+            concept_response = self.client.models.generate_content(
+                model=MODEL,
+                contents=[concept_prompt],
+                config={
+                    "max_output_tokens": 50,
+                    "temperature": 0.2
+                }
+            )
+            
+            concept = concept_response.text.strip()
+            
             # Update history
             state["question_history"].append({
                 "question": state["question"],
                 "user_answer": "NOT SURE",
                 "correct_answer": correct_answer,
-                "concept": "Unknown",  # We don't know the concept for "not sure"
+                "concept": concept,
                 "is_correct": False
             })
             
             # Generate next question
-            state["question"], state["correct_answer"] = await self._generate_question(
+            state["question"], state["correct_answer"], concept_tested = await self._generate_question(
                 state["topic"], 
-                state["weak_areas"],
                 state["question_history"],
                 state["pdf_files"]
             )
@@ -385,14 +522,14 @@ class StudyAgent:
         eval_response = await self._evaluate_answer(state["question"], user_answer, correct_answer, pdf_files=state["pdf_files"])
         
         if eval_response is None:
-            state["question"], state["correct_answer"] = await self._generate_question(state["topic"], pdf_files=state["pdf_files"])
+            state["question"], state["correct_answer"], _ = await self._generate_question(state["topic"], question_history=state["question_history"], pdf_files=state["pdf_files"])
             return f"Sorry, I couldn't grade your response.\n\nHere's a new question:\n{state['question']}"
         
         is_correct = eval_response["correct"]
         concept = eval_response["concept"]
         feedback = eval_response["feedback"]
         
-        # Update history and weak areas
+        # Update history
         state["question_history"].append({
             "question": state["question"],
             "user_answer": user_answer,
@@ -401,13 +538,9 @@ class StudyAgent:
             "is_correct": is_correct
         })
         
-        if not is_correct:
-            state["weak_areas"].add(concept)
-        
         # Generate next question focusing on weak areas
-        state["question"], state["correct_answer"] = await self._generate_question(
+        state["question"], state["correct_answer"], concept_tested = await self._generate_question(
             state["topic"], 
-            state["weak_areas"],
             state["question_history"],
             state["pdf_files"]
         )
