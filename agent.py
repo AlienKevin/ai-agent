@@ -34,7 +34,7 @@ class StudyAgent:
         self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.conversation_state = {}  # Track state per user
         self.command_patterns = {
-            Command.ANSWER: r'!answer\s+([A-Ea-e])',
+            Command.ANSWER: r'!answer\s+([A-Ea-e]|not sure)',
             Command.QUESTION: r'!question\s+(.*)',
             Command.TOPIC: r'!topic\s+(.*)',
             Command.UPLOAD: r'!upload'
@@ -222,7 +222,7 @@ class StudyAgent:
         return (
             "How can I help you learn today? You can use the following commands:\n"
             "- `!topic [subject]` - Start learning about a specific topic\n"
-            "- `!answer [A/B/C/D/E]` - Answer the current question\n"
+            "- `!answer [A/B/C/D/E]` or `!answer not sure` - Answer the current question\n"
             "- `!question [question]` - Ask any question about the topic\n"
             "- `!upload` - Upload PDF documents to study from (attach files with this command)"
             f"{pdf_message}"
@@ -260,7 +260,11 @@ class StudyAgent:
             match = re.match(pattern, message_content, re.IGNORECASE)
             if match:
                 if command == Command.ANSWER:
-                    return command, match.group(1).upper()
+                    answer = match.group(1).strip().upper()
+                    # Handle "not sure" case
+                    if re.match(r'NOT\s*SURE', answer, re.IGNORECASE):
+                        return command, "NOT SURE"
+                    return command, answer
                 elif command in [Command.QUESTION, Command.TOPIC]:
                     return command, match.group(1)
                 else:  # Command.UPLOAD
@@ -310,6 +314,72 @@ class StudyAgent:
         
     async def _handle_question_answer(self, user_answer, state):
         """Handle when user is answering a question"""
+        # Handle "not sure" response
+        if user_answer == "NOT SURE":
+            # Generate feedback for "not sure" response
+            correct_answer = state["correct_answer"].strip().upper()
+            feedback = f"The correct answer is {correct_answer}. Let me explain:\n\n"
+            
+            # Add explanation based on the options
+            question_parts = state["question"].split("\n\n")
+            question_text = question_parts[0]
+            options = question_parts[1].split("\n")
+            
+            # Find the correct option text
+            correct_option_text = ""
+            for option in options:
+                if option.startswith(f"{correct_answer})"):
+                    correct_option_text = option[3:].strip()
+                    break
+            
+            # Generate an explanation
+            content = f"Question: {question_text}\nCorrect answer: {correct_answer}) {correct_option_text}\nExplain why this is correct."
+            
+            contents = []
+            contents = await self._add_pdf_contents(contents, state["pdf_files"])
+            contents.append(content)
+            
+            response = self.client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+                config={
+                    "max_output_tokens": 500,
+                    "temperature": 0.7
+                }
+            )
+            
+            feedback += response.text
+            
+            # Update history
+            state["question_history"].append({
+                "question": state["question"],
+                "user_answer": "NOT SURE",
+                "correct_answer": correct_answer,
+                "concept": "Unknown",  # We don't know the concept for "not sure"
+                "is_correct": False
+            })
+            
+            # Generate next question
+            state["question"], state["correct_answer"] = await self._generate_question(
+                state["topic"], 
+                state["weak_areas"],
+                state["question_history"],
+                state["pdf_files"]
+            )
+            
+            # Prepare response text
+            response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+            
+            # Truncate if too long for Discord
+            if len(response_text) > 1900:  # Leave some buffer
+                # Truncate the feedback part while preserving the question and instructions
+                max_feedback_length = 1900 - len(f"\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics.")
+                truncated_feedback = feedback[:max_feedback_length] + "... (feedback truncated)"
+                response_text = f"{truncated_feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+            
+            return response_text
+        
+        # Handle regular answer
         correct_answer = state["correct_answer"].strip().upper()
         
         eval_response = await self._evaluate_answer(state["question"], user_answer, correct_answer, pdf_files=state["pdf_files"])
@@ -342,7 +412,17 @@ class StudyAgent:
             state["pdf_files"]
         )
         
-        return f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+        # Prepare response text
+        response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+        
+        # Truncate if too long for Discord
+        if len(response_text) > 1900:  # Leave some buffer
+            # Truncate the feedback part while preserving the question and instructions
+            max_feedback_length = 1900 - len(f"\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics.")
+            truncated_feedback = feedback[:max_feedback_length] + "... (feedback truncated)"
+            response_text = f"{truncated_feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` or `!answer not sure` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+        
+        return response_text
 
     async def _handle_pdf_attachments(self, message):
         """Handle PDF attachments from the user"""
@@ -398,4 +478,4 @@ class StudyAgent:
             return await self._handle_initial_state(message.content, state)
         elif state["state"] == UserState.ASKING_QUESTION:
             # Treat as a regular message - suggest using commands
-            return "I didn't recognize that as a command. Please use `!answer [A/B/C/D/E]` to answer the question, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+            return "I didn't recognize that as a command. Please use `!answer [A/B/C/D/E]` or `!answer not sure` to answer the question, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."

@@ -162,8 +162,8 @@ async def topic(ctx, *, subject):
     await ctx.send(response)
 
 
-@bot.command(name="answer", help="Answer the current question (A, B, C, D, or E)")
-async def answer(ctx, option):
+@bot.command(name="answer", help="Answer the current question (A, B, C, D, or E) or 'not sure'")
+async def answer(ctx, *, option):
     # Modify the message content to use the !answer command format
     ctx.message.content = f"!answer {option}"
     # Process with the agent
