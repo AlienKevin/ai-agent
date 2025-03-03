@@ -24,7 +24,7 @@ class UserState(Enum):
 
 class Command(Enum):
     ANSWER = "answer"
-    FOLLOWUP = "followup"
+    QUESTION = "question"
     TOPIC = "topic"
     UPLOAD = "upload"
     NONE = "none"
@@ -35,7 +35,7 @@ class StudyAgent:
         self.conversation_state = {}  # Track state per user
         self.command_patterns = {
             Command.ANSWER: r'!answer\s+([A-Ea-e])',
-            Command.FOLLOWUP: r'!followup\s+(.*)',
+            Command.QUESTION: r'!question\s+(.*)',
             Command.TOPIC: r'!topic\s+(.*)',
             Command.UPLOAD: r'!upload'
         }
@@ -190,6 +190,14 @@ class StudyAgent:
 
     def _initialize_state(self, user_id: str):
         """Initialize conversation state for a new user."""
+        # Check for existing PDF files in the user's directory
+        pdf_files = []
+        user_dir = f"user_files/{user_id}"
+        if os.path.exists(user_dir):
+            for filename in os.listdir(user_dir):
+                if filename.lower().endswith('.pdf'):
+                    pdf_files.append(f"{user_dir}/{filename}")
+        
         self.conversation_state[user_id] = {
             "state": UserState.INITIAL,
             "topic": None,
@@ -197,15 +205,27 @@ class StudyAgent:
             "correct_answer": None,
             "question_history": [],  # Track previous questions and answers
             "weak_areas": set(),     # Track concepts user struggled with
-            "pdf_files": []          # Store paths to saved PDF files
+            "pdf_files": pdf_files   # Store paths to saved PDF files
         }
-        print("initialized state")
+        
+        # Log the initialization
+        if pdf_files:
+            print(f"Initialized state for user {user_id} with {len(pdf_files)} existing PDF files")
+        else:
+            print(f"Initialized state for user {user_id}")
+        
+        # Customize the message based on whether there are existing PDFs
+        pdf_message = ""
+        if pdf_files:
+            pdf_message = f"\n\nI found {len(pdf_files)} previously uploaded PDF document(s). You can use `!topic [subject]` to start learning from these materials."
+            
         return (
             "How can I help you learn today? You can use the following commands:\n"
             "- `!topic [subject]` - Start learning about a specific topic\n"
             "- `!answer [A/B/C/D/E]` - Answer the current question\n"
-            "- `!followup [question]` - Ask a followup question about the topic\n"
+            "- `!question [question]` - Ask any question about the topic\n"
             "- `!upload` - Upload PDF documents to study from (attach files with this command)"
+            f"{pdf_message}"
         )
 
     async def _save_attachment(self, attachment, user_id):
@@ -241,17 +261,17 @@ class StudyAgent:
             if match:
                 if command == Command.ANSWER:
                     return command, match.group(1).upper()
-                elif command in [Command.FOLLOWUP, Command.TOPIC]:
+                elif command in [Command.QUESTION, Command.TOPIC]:
                     return command, match.group(1)
                 else:  # Command.UPLOAD
                     return command, None
         
         return Command.NONE, message_content
         
-    async def _handle_followup_question(self, question, topic, pdf_files=None):
-        """Handle a followup question from the user"""
+    async def _handle_question(self, question, topic, pdf_files=None):
+        """Handle a question from the user about the topic"""
         content = f"Answer this question about {topic}: {question}"
-        print("responding to followup question")
+        print("responding to question")
         
         contents = []
         contents = await self._add_pdf_contents(contents, pdf_files)
@@ -322,7 +342,7 @@ class StudyAgent:
             state["pdf_files"]
         )
         
-        return f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` to answer, `!followup [question]` to ask a followup, or `!topic [subject]` to switch topics."
+        return f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` to answer, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
 
     async def _handle_pdf_attachments(self, message):
         """Handle PDF attachments from the user"""
@@ -361,9 +381,9 @@ class StudyAgent:
         if command == Command.TOPIC:
             return await self._handle_topic_switch(state, argument)
             
-        if command == Command.FOLLOWUP:
+        if command == Command.QUESTION:
             if state["topic"]:
-                return await self._handle_followup_question(argument, state["topic"], state["pdf_files"])
+                return await self._handle_question(argument, state["topic"], state["pdf_files"])
             else:
                 return "Please set a topic first using `!topic [subject]`"
             
@@ -378,4 +398,4 @@ class StudyAgent:
             return await self._handle_initial_state(message.content, state)
         elif state["state"] == UserState.ASKING_QUESTION:
             # Treat as a regular message - suggest using commands
-            return "I didn't recognize that as a command. Please use `!answer [A/B/C/D/E]` to answer the question, `!followup [question]` to ask a followup, or `!topic [subject]` to switch topics."
+            return "I didn't recognize that as a command. Please use `!answer [A/B/C/D/E]` to answer the question, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
