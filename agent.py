@@ -4,9 +4,9 @@ from google.genai import types
 import discord
 import json
 import pathlib
-import httpx
 from enum import Enum, auto
 import re
+import hashlib
 
 MODEL = "gemini-2.0-flash"
 
@@ -140,13 +140,9 @@ class StudyAgent:
         
         # Add PDF files to the contents if available
         if pdf_files:
-            for pdf_path in pdf_files:
-                contents.append(
-                    types.Part.from_bytes(
-                        data=pathlib.Path(pdf_path).read_bytes(),
-                        mime_type='application/pdf',
-                    )
-                )
+            gemini_files = await self._get_gemini_files(pdf_files)
+            for gemini_file in gemini_files:
+                contents.append(gemini_file)
         
         # Add the text content
         contents.append(content)
@@ -298,13 +294,9 @@ Evaluate the student's answer and provide detailed feedback."""
             
             # Add PDF files to the contents if available
             if pdf_files:
-                for pdf_path in pdf_files:
-                    contents.append(
-                        types.Part.from_bytes(
-                            data=pathlib.Path(pdf_path).read_bytes(),
-                            mime_type='application/pdf',
-                        )
-                    )
+                gemini_files = await self._get_gemini_files(pdf_files)
+                for gemini_file in gemini_files:
+                    contents.append(gemini_file)
             
             # Add the text content
             contents.append(content)
@@ -354,6 +346,9 @@ Evaluate the student's answer and provide detailed feedback."""
 
     def _initialize_state(self, user_id: str):
         """Initialize conversation state for a new user."""
+
+        self.user_id = user_id
+
         # Check for existing PDF files in the user's directory
         pdf_files = []
         user_dir = f"user_files/{user_id}"
@@ -405,6 +400,56 @@ Evaluate the student's answer and provide detailed feedback."""
         # Download and save the file
         await attachment.save(filepath)
         return filepath
+    
+    async def _get_file_hash(self, filepath):
+        """Calculate SHA256 hash of a file."""
+        sha256_hash = hashlib.sha256()
+        with open(filepath, "rb") as f:
+            # Read and update hash in chunks of 4K
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    
+    async def _get_gemini_files(self, file_paths):
+        """Upload files to Gemini API and return file objects."""
+        gemini_files = []
+        
+        # Create user directory if it doesn't exist
+        user_dir = f"user_files/{self.user_id}"
+        os.makedirs(user_dir, exist_ok=True)
+        
+        # Path to the file mapping JSON
+        mapping_file = f"{user_dir}/file_mapping.json"
+        
+        # Load existing mapping if it exists
+        file_mapping = {}
+        if os.path.exists(mapping_file):
+            with open(mapping_file, 'r') as f:
+                file_mapping = json.load(f)
+        
+        # Process each file
+        for filepath in file_paths:
+            # Calculate file hash
+            file_hash = await self._get_file_hash(filepath)
+            
+            # Check if file is already uploaded
+            if file_hash in file_mapping:
+                print(f"Using existing Gemini file for {filepath}")
+                gemini_files.append(file_mapping[file_hash])
+            else:
+                # Upload file to Gemini
+                print(f"Uploading {filepath} to Gemini")
+                gemini_file = self.client.files.upload(file=filepath)
+                
+                # Store the mapping
+                file_mapping[file_hash] = gemini_file.name
+                gemini_files.append(gemini_file.name)
+        
+        # Save updated mapping
+        with open(mapping_file, 'w') as f:
+            json.dump(file_mapping, f)
+
+        return gemini_files
         
     async def _add_pdf_contents(self, contents, pdf_files):
         """Helper method to add PDF files to contents list"""
@@ -458,14 +503,17 @@ Evaluate the student's answer and provide detailed feedback."""
         print("responding to question")
         
         contents = []
-        contents = await self._add_pdf_contents(contents, pdf_files)
+        if pdf_files:
+            gemini_files = await self._get_gemini_files(pdf_files)
+            for gemini_file in gemini_files:
+                contents.append(gemini_file)
         contents.append(content)
         
         response = self.client.models.generate_content(
             model=MODEL,
             contents=contents,
             config={
-                "max_output_tokens": 800,  # Limit response to fit in Discord's message limit
+                "max_output_tokens": 250,  # Limit response to fit in Discord's message limit
                 "temperature": 0.7
             }
         )
@@ -526,14 +574,17 @@ Evaluate the student's answer and provide detailed feedback."""
             content += "\nExplain why these are correct."
             
             contents = []
-            contents = await self._add_pdf_contents(contents, state["pdf_files"])
+            if state["pdf_files"]:
+                gemini_files = await self._get_gemini_files(state["pdf_files"])
+                for gemini_file in gemini_files:
+                    contents.append(gemini_file)
             contents.append(content)
             
             response = self.client.models.generate_content(
                 model=MODEL,
                 contents=contents,
                 config={
-                    "max_output_tokens": 500,
+                    "max_output_tokens": 250,
                     "temperature": 0.7
                 }
             )
