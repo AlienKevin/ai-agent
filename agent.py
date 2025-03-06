@@ -11,16 +11,16 @@ import hashlib
 MODEL = "gemini-2.0-flash"
 
 SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these steps:
-1. If the user hasn't specified a topic yet, ask them what topic they want to learn about
+1. If the user hasn't specified a goal yet, ask them what learning goal they want to achieve
 2. Generate multiple choice questions to test their understanding, with these priorities:
    a) Focus on areas they've struggled with in previous questions
-   b) Ensure comprehensive coverage of all parts of the specified topic
-   c) Systematically explore different aspects of the topic, even those not yet tested
+   b) Ensure comprehensive coverage of all parts of the specified goal
+   c) Systematically explore different aspects of the goal, even those not yet tested
 3. When they answer, grade their response and provide helpful feedback
-4. Continue with more questions on the same topic until they want to switch topics
+4. Continue with more questions on the same goal until they want to switch goals
 5. Always ground your questions and answers in the uploaded documents (PDF files) if available - these may be past exams, lecture slides, or textbook content
 6. Prioritize content from the uploaded documents when creating questions
-7. Make sure to cover ALL parts of the topic mentioned in the uploaded documents
+7. Make sure to cover ALL parts of the goal mentioned in the uploaded documents
 
 ⚠️ CRITICAL REQUIREMENT: CREATE FULLY SELF-CONTAINED QUESTIONS ⚠️
 - All questions MUST be completely self-contained in text form
@@ -30,7 +30,7 @@ SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these 
 - NEVER say "refer to figure X" or "as shown in the diagram" or similar phrases
 - If a concept relies heavily on visual elements that cannot be adequately described in text, choose a different concept to test
 
-Keep track of their performance through question history to adapt questions to their needs. Your goal is to help them master difficult concepts while ensuring comprehensive coverage of the entire topic."""
+Keep track of their performance through question history to adapt questions to their needs. Your goal is to help them master difficult concepts while ensuring comprehensive coverage of the entire goal."""
 
 class UserState(Enum):
     INITIAL = auto()
@@ -40,7 +40,7 @@ class UserState(Enum):
 class Command(Enum):
     ANSWER = "answer"
     QUESTION = "question"
-    TOPIC = "topic"
+    GOAL = "goal"
     UPLOAD = "upload"
     NONE = "none"
 
@@ -51,14 +51,14 @@ class StudyAgent:
         self.command_patterns = {
             Command.ANSWER: r'!answer\s+([A-Ea-e](?:[,\s]+[A-Ea-e])*|not sure)',
             Command.QUESTION: r'!question\s+(.*)',
-            Command.TOPIC: r'!topic\s+(.*)',
+            Command.GOAL: r'!goal\s+(.*)',
             Command.UPLOAD: r'!upload'
         }
 
-    async def _generate_question(self, topic: str, question_history=None, pdf_files=None):
-        """Generate a multiple choice question about the given topic."""
+    async def _generate_question(self, goal: str, question_history=None, pdf_files=None):
+        """Generate a multiple choice question about the given goal."""
         # Base prompt
-        content = f"Generate a challenging multiple choice question about {topic}."
+        content = f"Generate a challenging multiple choice question about {goal}."
         
         # Track covered concepts and identify weak areas from question history
         covered_concepts = set()
@@ -74,18 +74,18 @@ class StudyAgent:
         
         # Determine question strategy based on history
         if question_history and len(question_history) > 0:
-            # Every third question should explore a new aspect of the topic
+            # Every third question should explore a new aspect of the goal
             if len(question_history) % 3 == 0:
-                content = f"Generate a challenging multiple choice question about {topic} that explores an aspect or concept NOT covered in previous questions. Focus on comprehensive coverage of the topic."
+                content = f"Generate a challenging multiple choice question for the following goal: {goal}. The question should explore an aspect or concept NOT covered in previous questions. Focus on comprehensive coverage of the goal."
             # Otherwise, focus on weak areas if available
             elif weak_concepts:
                 # Sort weak concepts by frequency (most frequently wrong first)
                 sorted_weak_concepts = sorted(weak_concepts.items(), key=lambda x: x[1], reverse=True)
                 weak_concepts_list = [concept for concept, count in sorted_weak_concepts[:3]]
-                content = f"Generate a challenging multiple choice question about {topic} that focuses specifically on these concepts: {weak_concepts_list}. These are areas where the student has shown weakness, so it's important to test them on these concepts."
+                content = f"Generate a challenging multiple choice question for the following goal: {goal}. The question should focus specifically on these concepts: {weak_concepts_list}. These are areas where the student has shown weakness, so it's important to test them on these concepts."
             # If no weak areas or it's not time for a new concept, use general question
             else:
-                content = f"Generate a challenging multiple choice question about {topic} that tests an important concept within this subject."
+                content = f"Generate a challenging multiple choice question for the following goal: {goal}. The question should test an important concept within this subject."
         
         # Add context about document usage and comprehensive coverage
         if pdf_files and len(pdf_files) > 0:
@@ -95,7 +95,7 @@ class StudyAgent:
             content += f"\n\nThe student has uploaded {len(pdf_files)} document(s). Use these as your primary source for creating questions."
             
             # Emphasize comprehensive coverage
-            content += f"\n\nEnsure you cover ALL parts of {topic} mentioned in the documents. If you've already covered some concepts in previous questions, try to explore different aspects of the topic."
+            content += f"\n\nEnsure you cover ALL parts of {goal} mentioned in the documents. If you've already covered some concepts in previous questions, try to explore different aspects of the goal."
             
             # Emphasize self-contained questions
             content += f"""\n\n⚠️ CRITICAL REQUIREMENT: CREATE FULLY SELF-CONTAINED QUESTIONS ⚠️
@@ -359,7 +359,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         self.conversation_state[user_id] = {
             "state": UserState.INITIAL,
-            "topic": None,
+            "goal": None,
             "question": None,
             "correct_answers": [],
             "question_history": [],  # Track previous questions and answers
@@ -375,14 +375,14 @@ Evaluate the student's answer and provide detailed feedback."""
         # Customize the message based on whether there are existing PDFs
         pdf_message = ""
         if pdf_files:
-            pdf_message = f"\n\nI found {len(pdf_files)} previously uploaded PDF document(s). You can use `!topic [subject]` to start learning from these materials."
+            pdf_message = f"\n\nI found {len(pdf_files)} previously uploaded PDF document(s). You can use `!goal [learning goal]` to start learning from these materials."
             
         return (
             "How can I help you learn today? You can use the following commands:\n"
-            "- `!topic [subject]` - Start learning about a specific topic\n"
+            "- `!goal [learning goal]` - Set a learning goal for this session\n"
             "- `!answer [letter]` or `!answer [letters]` - Answer the current question (e.g., `!answer A` or `!answer A,B,C` for multiple answers)\n"
             "- `!answer not sure` - Skip the current question if you don't know the answer\n"
-            "- `!question [question]` - Ask any question about the topic\n"
+            "- `!question [question]` - Ask any question about the goal\n"
             "- `!upload` - Upload PDF documents to study from (attach files with this command)"
             f"{pdf_message}"
         )
@@ -491,15 +491,15 @@ Evaluate the student's answer and provide detailed feedback."""
                         return command, answer_text
                     return command, "INVALID"
                     
-                elif command in [Command.QUESTION, Command.TOPIC]:
+                elif command in [Command.QUESTION, Command.GOAL]:
                     return command, match.group(1)
                 else:  # Command.UPLOAD
                     return command, None
         return Command.NONE, message_content
         
-    async def _handle_question(self, question, topic, pdf_files=None):
-        """Handle a question from the user about the topic"""
-        content = f"Answer this question about {topic}: {question}"
+    async def _handle_question(self, question, goal, pdf_files=None):
+        """Handle a question from the user about the goal"""
+        content = f"Answer this question: {question}"
         print("responding to question")
         
         contents = []
@@ -520,20 +520,20 @@ Evaluate the student's answer and provide detailed feedback."""
         
         return response.text
         
-    async def _handle_topic_switch(self, state, new_topic):
-        """Handle a topic switch from the user"""
+    async def _handle_goal_switch(self, state, new_goal):
+        """Handle a goal switch from the user"""
         state["state"] = UserState.INITIAL
-        state["topic"] = new_topic if new_topic else None
+        state["goal"] = new_goal if new_goal else None
         
-        if state["topic"]:
+        if state["goal"]:
             state["state"] = UserState.ASKING_QUESTION
-            state["question"], state["correct_answers"], _ = await self._generate_question(state["topic"], question_history=None, pdf_files=state["pdf_files"])
+            state["question"], state["correct_answers"], _ = await self._generate_question(state["goal"], question_history=None, pdf_files=state["pdf_files"])
             return state["question"]
-        return "What new topic would you like to learn about? Use `!topic [subject]`"
+        return "What learning goal would you like to set for this session? Use `!goal [learning goal]`"
         
     async def _handle_initial_state(self, message_content, state):
-        """Handle the initial state when user is providing a topic"""
-        state["topic"] = message_content
+        """Handle the initial state when user is providing a goal"""
+        state["goal"] = message_content
         state["state"] = UserState.ASKING_QUESTION
         
         state["question"], state["correct_answers"], _ = await self._generate_question(message_content, question_history=None, pdf_files=state["pdf_files"])
@@ -616,7 +616,7 @@ Evaluate the student's answer and provide detailed feedback."""
             
             # Generate next question
             state["question"], state["correct_answers"], concept_tested = await self._generate_question(
-                state["topic"], 
+                state["goal"], 
                 state["question_history"],
                 state["pdf_files"]
             )
@@ -655,7 +655,7 @@ Evaluate the student's answer and provide detailed feedback."""
         eval_response = await self._evaluate_answer(state["question"], user_answer_display, correct_answers, pdf_files=state["pdf_files"])
         
         if eval_response is None:
-            state["question"], state["correct_answers"], _ = await self._generate_question(state["topic"], question_history=state["question_history"], pdf_files=state["pdf_files"])
+            state["question"], state["correct_answers"], _ = await self._generate_question(state["goal"], question_history=state["question_history"], pdf_files=state["pdf_files"])
             return f"Sorry, I couldn't grade your response.\n\nHere's a new question:\n{state['question']}"
         
         is_correct = eval_response["correct"]
@@ -673,7 +673,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         # Generate next question focusing on weak areas
         state["question"], state["correct_answers"], concept_tested = await self._generate_question(
-            state["topic"], 
+            state["goal"], 
             state["question_history"],
             state["pdf_files"]
         )
@@ -730,20 +730,20 @@ Evaluate the student's answer and provide detailed feedback."""
             return await self._handle_pdf_attachments(message)
         
         # Handle commands based on type
-        if command == Command.TOPIC:
-            return await self._handle_topic_switch(state, argument)
+        if command == Command.GOAL:
+            return await self._handle_goal_switch(state, argument)
             
         if command == Command.QUESTION:
-            if state["topic"]:
-                return await self._handle_question(argument, state["topic"], state["pdf_files"])
+            if state["goal"]:
+                return await self._handle_question(argument, state["goal"], state["pdf_files"])
             else:
-                return "Please set a topic first using `!topic [subject]`"
+                return "Please set a goal first using `!goal [learning goal]`"
             
         if command == Command.ANSWER:
             if state["state"] == UserState.ASKING_QUESTION:
                 return await self._handle_question_answer(argument, state)
             else:
-                return "There's no active question to answer. Use `!topic [subject]` to start a new topic."
+                return "There's no active question to answer. Use `!goal [learning goal]` to start a new goal."
         
         # Handle regular messages (no command)
         if state["state"] == UserState.INITIAL:

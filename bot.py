@@ -153,10 +153,10 @@ async def ping(ctx, *, arg=None):
 
 
 # Register agent commands as bot commands
-@bot.command(name="topic", help="Start learning about a specific topic")
-async def topic(ctx, *, subject):
-    # Modify the message content to use the !topic command format
-    ctx.message.content = f"!topic {subject}"
+@bot.command(name="goal", help="Set the learning goal for this session")
+async def goal(ctx, *, goal):
+    # Modify the message content to use the !goal command format
+    ctx.message.content = f"!goal {goal}"
     # Process with the agent
     response = await agent.run(ctx.message)
     await ctx.send(response)
