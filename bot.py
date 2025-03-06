@@ -171,10 +171,10 @@ async def answer(ctx, *, option):
     await ctx.send(response)
 
 
-@bot.command(name="question", help="Ask any question about the topic")
-async def question(ctx, *, query):
-    # Modify the message content to use the !question command format
-    ctx.message.content = f"!question {query}"
+@bot.command(name="ask", help="Ask any question about the topic")
+async def ask(ctx, *, query):
+    # Modify the message content to use the !ask command format
+    ctx.message.content = f"!ask {query}"
     # Process with the agent
     response = await agent.run(ctx.message)
     await ctx.send(response)

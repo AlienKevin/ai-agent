@@ -39,7 +39,7 @@ class UserState(Enum):
 
 class Command(Enum):
     ANSWER = "answer"
-    QUESTION = "question"
+    ASK = "ask"
     GOAL = "goal"
     UPLOAD = "upload"
     NONE = "none"
@@ -50,7 +50,7 @@ class StudyAgent:
         self.conversation_state = {}  # Track state per user
         self.command_patterns = {
             Command.ANSWER: r'!answer\s+([A-Ea-e](?:[,\s]+[A-Ea-e])*|not sure)',
-            Command.QUESTION: r'!question\s+(.*)',
+            Command.ASK: r'!ask\s+(.*)',
             Command.GOAL: r'!goal\s+(.*)',
             Command.UPLOAD: r'!upload'
         }
@@ -382,7 +382,7 @@ Evaluate the student's answer and provide detailed feedback."""
             "- `!goal [learning goal]` - Set a learning goal for this session\n"
             "- `!answer [letter]` or `!answer [letters]` - Answer the current question (e.g., `!answer A` or `!answer A,B,C` for multiple answers)\n"
             "- `!answer not sure` - Skip the current question if you don't know the answer\n"
-            "- `!question [question]` - Ask any question about the goal\n"
+            "- `!ask [question]` - Ask any question related to the set goal\n"
             "- `!upload` - Upload PDF documents to study from (attach files with this command)"
             f"{pdf_message}"
         )
@@ -491,7 +491,7 @@ Evaluate the student's answer and provide detailed feedback."""
                         return command, answer_text
                     return command, "INVALID"
                     
-                elif command in [Command.QUESTION, Command.GOAL]:
+                elif command in [Command.ASK, Command.GOAL]:
                     return command, match.group(1)
                 else:  # Command.UPLOAD
                     return command, None
@@ -499,7 +499,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
     async def _handle_question(self, question, goal, pdf_files=None):
         """Handle a question from the user about the goal"""
-        content = f"Answer this question: {question}"
+        content = f"Answer this question concisely within 2000 characters: {question}"
         print("responding to question")
         
         contents = []
@@ -571,7 +571,7 @@ Evaluate the student's answer and provide detailed feedback."""
             content = f"Question: {question_text}\nCorrect answer{'s' if len(correct_answers) > 1 else ''}: {correct_answers_display}\n"
             for option_text in correct_options_text:
                 content += f"- {option_text}\n"
-            content += "\nExplain why these are correct."
+            content += "\nExplain why these are correct concisely within 2000 characters."
             
             contents = []
             if state["pdf_files"]:
@@ -733,7 +733,7 @@ Evaluate the student's answer and provide detailed feedback."""
         if command == Command.GOAL:
             return await self._handle_goal_switch(state, argument)
             
-        if command == Command.QUESTION:
+        if command == Command.ASK:
             if state["goal"]:
                 return await self._handle_question(argument, state["goal"], state["pdf_files"])
             else:
@@ -750,4 +750,4 @@ Evaluate the student's answer and provide detailed feedback."""
             return await self._handle_initial_state(message.content, state)
         elif state["state"] == UserState.ASKING_QUESTION:
             # Treat as a regular message - suggest using commands
-            return "I didn't recognize that as a command. Please use `!answer [A/B/C/D/E]` or `!answer not sure` to answer the question, `!question [question]` to ask a question, or `!topic [subject]` to switch topics."
+            return "I didn't recognize that as a command. Please use `!answer [A/B/C/D/E]` or `!answer not sure` to answer the question, `!ask [question]` to ask a question, or `!goal [subject]` to switch topics."
