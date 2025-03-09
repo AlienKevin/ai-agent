@@ -11,7 +11,7 @@ import re
 import hashlib
 import time
 
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.0-flash-lite"
 
 class QuizState:
     def __init__(self, duration_minutes: int, goal: str):
@@ -256,11 +256,12 @@ Evaluate the student's answer and provide detailed feedback."""
             
             contents = []
             
-            # Add PDF files to the contents if available
-            if pdf_files:
-                gemini_files = await self._get_gemini_files(pdf_files)
-                for gemini_file in gemini_files:
-                    contents.append(gemini_file)
+            # Don't need to reference sources when evaluating answer
+            # # Add PDF files to the contents if available
+            # if pdf_files:
+            #     gemini_files = await self._get_gemini_files(pdf_files)
+            #     for gemini_file in gemini_files:
+            #         contents.append(gemini_file)
             
             # Add the text content
             contents.append(content)
@@ -668,7 +669,7 @@ Evaluate the student's answer and provide detailed feedback."""
                 pdf_files.append(filepath)
         
         if pdf_files:
-            return f"I've received {len(pdf_files)} PDF document(s). I'll use these to help with your learning. Use `!topic [subject]` to start learning about a specific topic from these materials."
+            return f"I've received {len(pdf_files)} PDF document(s). I'll use these to help with your learning. Use `!goal [subject]` to set learning goal."
         else:
             return "I can only process PDF files at the moment. Please send PDF documents with the `!upload` command."
 
