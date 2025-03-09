@@ -13,28 +13,6 @@ import time
 
 MODEL = "gemini-2.0-flash"
 
-SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these steps:
-1. If the user hasn't specified a goal yet, ask them what learning goal they want to achieve
-2. Generate multiple choice questions to test their understanding, with these priorities:
-   a) Focus on areas they've struggled with in previous questions
-   b) Ensure comprehensive coverage of all parts of the specified goal
-   c) Systematically explore different aspects of the goal, even those not yet tested
-3. When they answer, grade their response and provide helpful feedback
-4. Continue with more questions on the same goal until they want to switch goals
-5. Always ground your questions and answers in the uploaded documents (PDF files) if available - these may be past exams, lecture slides, or textbook content
-6. Prioritize content from the uploaded documents when creating questions
-7. Make sure to cover ALL parts of the goal mentioned in the uploaded documents
-
-⚠️ CRITICAL REQUIREMENT: CREATE FULLY SELF-CONTAINED QUESTIONS ⚠️
-- All questions MUST be completely self-contained in text form
-- NEVER reference figures, images, diagrams, or visual elements that cannot be fully described in text
-- If the document contains visual elements, either fully describe them in text or avoid questions that depend on them
-- Users should NEVER need to look at the original documents to understand or answer questions
-- NEVER say "refer to figure X" or "as shown in the diagram" or similar phrases
-- If a concept relies heavily on visual elements that cannot be adequately described in text, choose a different concept to test
-
-Keep track of their performance through question history to adapt questions to their needs. Your goal is to help them master difficult concepts while ensuring comprehensive coverage of the entire goal."""
-
 class QuizState:
     def __init__(self, duration_minutes: int, goal: str):
         self.start_time = time.time()
@@ -60,6 +38,7 @@ class QuizState:
         minutes = seconds // 60
         seconds = seconds % 60
         return f"{minutes:02d}:{seconds:02d}"
+
 
 class UserState(Enum):
     INITIAL = auto()
@@ -88,93 +67,34 @@ class StudyAgent:
         }
         self.quiz_states = {}  # Store quiz states per user
 
-    async def _generate_question(self, goal: str, question_history=None, pdf_files=None):
-        """Generate a multiple choice question about the given goal."""
+    async def _generate_question(self, state):
+        """Generate a multiple choice question based on the conversation history in the state."""
+        goal = state["goal"]
+        question_history = state["question_history"]
+        pdf_files = state["pdf_files"]
+        
         # Base prompt
         content = f"Generate a challenging multiple choice question about {goal}."
         
-        # Track covered concepts and identify weak areas from question history
-        covered_concepts = set()
-        weak_concepts = {}
-        
-        if question_history:
-            for q in question_history:
-                if 'concept' in q and q['concept'] != 'Unknown':
-                    covered_concepts.add(q['concept'])
-                    # Track concepts the user got wrong
-                    if not q.get('is_correct', True):
-                        weak_concepts[q['concept']] = weak_concepts.get(q['concept'], 0) + 1
-        
-        # Determine question strategy based on history
         if question_history and len(question_history) > 0:
-            # Every third question should explore a new aspect of the goal
-            if len(question_history) % 3 == 0:
-                content = f"Generate a challenging multiple choice question for the following goal: {goal}. The question should explore an aspect or concept NOT covered in previous questions. Focus on comprehensive coverage of the goal."
-            # Otherwise, focus on weak areas if available
-            elif weak_concepts:
-                # Sort weak concepts by frequency (most frequently wrong first)
-                sorted_weak_concepts = sorted(weak_concepts.items(), key=lambda x: x[1], reverse=True)
-                weak_concepts_list = [concept for concept, count in sorted_weak_concepts[:3]]
-                content = f"Generate a challenging multiple choice question for the following goal: {goal}. The question should focus specifically on these concepts: {weak_concepts_list}. These are areas where the student has shown weakness, so it's important to test them on these concepts."
-            # If no weak areas or it's not time for a new concept, use general question
-            else:
-                content = f"Generate a challenging multiple choice question for the following goal: {goal}. The question should test an important concept within this subject."
+            content += f"\n\nThe student has already answered these questions:"
+            for i, q in enumerate(question_history):
+                content += f"\n{i+1}. Question: {q['question']}\n   User answered: {q['user_answer']}\n   Correct answer: {q['correct_answers']}"
         
         # Add context about document usage and comprehensive coverage
         if pdf_files and len(pdf_files) > 0:
-            content += f"\n\nIMPORTANT: Base your question on content from the uploaded documents. These may be lecture slides, past exams, or textbook content. Extract specific concepts, examples, or problems from these materials to create an authentic question."
+            content += f"\n\nBase your question on content from the uploaded documents. These may be lecture slides, past exams, or textbook content. Extract specific concepts, examples, or problems from these materials to create an authentic question. Cite your sources specific to each document. Ensure you cover ALL parts of {goal} mentioned in the documents and that the question is fully self-contained in text form."
             
-            # Add information about the number of documents
-            content += f"\n\nThe student has uploaded {len(pdf_files)} document(s). Use these as your primary source for creating questions."
-            
-            # Emphasize comprehensive coverage
-            content += f"\n\nEnsure you cover ALL parts of {goal} mentioned in the documents. If you've already covered some concepts in previous questions, try to explore different aspects of the goal."
-            
-            # Emphasize self-contained questions
-            content += f"""\n\n⚠️ CRITICAL REQUIREMENT: CREATE FULLY SELF-CONTAINED QUESTIONS ⚠️
-1. Questions MUST be completely self-contained in text form
-2. DO NOT create questions that reference figures, images, diagrams, or visual elements from the documents
-3. If you need to reference content that appears in a figure or diagram, fully describe it in text within your question
-4. The user should NEVER need to look at the original document to understand or answer the question
-5. If a concept relies heavily on visual elements that cannot be adequately described in text, choose a different concept to test
-6. NEVER say "refer to figure X" or "as shown in the diagram" or similar phrases"""
-        
-        # Add information about covered concepts
-        if covered_concepts:
-            content += f"\n\nConcepts already covered in previous questions: {list(covered_concepts)}."
-        
-        # Add information about weak concepts
-        if weak_concepts:
-            content += f"\n\nThe student has struggled with these concepts (consider focusing on them): {list(weak_concepts.keys())}."
-        
-        # Add question history context if available
-        if question_history and len(question_history) > 0:
-            # Extract concepts the user got wrong
-            incorrect_questions = [q for q in question_history if not q.get("is_correct", False)]
-            if incorrect_questions:
-                content += f"\n\nThe student has struggled with these previous questions (focus on similar concepts):"
-                for i, q in enumerate(incorrect_questions[-3:]):  # Show last 3 incorrect questions
-                    # Handle both old format (correct_answer) and new format (correct_answers)
-                    if "correct_answer" in q:
-                        correct_ans_display = q["correct_answer"]
-                    else:
-                        correct_ans_display = ", ".join(q["correct_answers"]) if isinstance(q["correct_answers"], list) else q["correct_answers"]
-                    
-                    content += f"\n{i+1}. Question: {q['question']}\n   User answered: {q['user_answer']}\n   Correct answer: {correct_ans_display}"
-            
-            # Avoid repeating questions
-            content += "\n\nAvoid creating questions that are too similar to these previous questions:"
-            for i, q in enumerate(question_history[-5:]):  # Last 5 questions
-                content += f"\n{i+1}. {q['question']}"
+        print("--- generating question ---")
+        print(content)
 
-        print("generating question")
-        
         contents = []
         
         # Add PDF files to the contents if available
         if pdf_files:
             gemini_files = await self._get_gemini_files(pdf_files)
             for gemini_file in gemini_files:
+                contents.append(f"Document name: {os.path.basename(self._get_file_path(gemini_file.name))}")
                 contents.append(gemini_file)
         
         # Add the text content
@@ -184,7 +104,7 @@ class StudyAgent:
             model=MODEL,
             contents=contents,
             config={
-                "max_output_tokens": 500,  # Limit response size
+                "max_output_tokens": 1000,  # Limit response size
                 "temperature": 0.7,
                 'response_mime_type': 'application/json',
                 'response_schema': {
@@ -232,16 +152,25 @@ class StudyAgent:
                             "type": "boolean",
                             "description": "Whether this question allows multiple correct answers"
                         },
-                        "concept_tested": {
-                            "type": "string",
-                            "description": "The specific concept or knowledge area being tested in this question"
-                        },
-                        "source": {
-                            "type": "string",
-                            "description": "If from an uploaded document, mention which document or slide this question is based on"
+                        "sources": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "document_relevance": {
+                                        "type": "string",
+                                        "description": "Briefly explain why this document is relevant to the question"
+                                    },
+                                    "document_name": {
+                                        "type": "string",
+                                        "description": "The name of the document this question is based on"
+                                    }
+                                },
+                                "required": ["document_relevance", "document_name"]
+                            }
                         }
                     },
-                    "required": ["question", "options", "correct_answers", "multiple_answers_allowed", "concept_tested"]
+                    "required": ["question", "options", "correct_answers", "multiple_answers_allowed", "sources"]
                 }
             }
         )
@@ -272,14 +201,16 @@ class StudyAgent:
             formatted_question += f"\nE) {question_data['options']['E']}"
         
         # Add source information if available
-        if 'source' in question_data and question_data['source']:
-            formatted_question += f"\n\n(Source: {question_data['source']})"
-        
-        # Extract the concept being tested
-        concept_tested = question_data.get('concept_tested', 'Unknown')
-        
+        if 'sources' in question_data and question_data['sources']:
+            formatted_question += "\n\nSources:"
+            for source in question_data['sources']:
+                formatted_question += f"\n* {source['document_name']}: {source['document_relevance']}"
+
+        print("--- formatted question ---")
+        print(formatted_question)
+
         # Return the formatted question, correct answers, and concept tested
-        return formatted_question, question_data['correct_answers'], concept_tested
+        return formatted_question, question_data['correct_answers']
 
     async def _evaluate_answer(self, question: str, user_answer: str, correct_answers: list, pdf_files=None):
         """Evaluate the user's answer and return feedback."""
@@ -420,10 +351,10 @@ Evaluate the student's answer and provide detailed feedback."""
             f"{pdf_message}"
         )
 
-    async def _save_attachment(self, attachment, user_id):
+    async def _save_attachment(self, attachment):
         """Save an attachment to disk and return the file path."""
         # Create directory for user if it doesn't exist
-        user_dir = f"user_files/{user_id}"
+        user_dir = f"user_files/{self.user_id}"
         os.makedirs(user_dir, exist_ok=True)
         
         # Generate a filename based on the attachment name
@@ -434,53 +365,73 @@ Evaluate the student's answer and provide detailed feedback."""
         await attachment.save(filepath)
         return filepath
     
-    async def _get_file_hash(self, filepath):
-        """Calculate SHA256 hash of a file."""
-        sha256_hash = hashlib.sha256()
-        with open(filepath, "rb") as f:
-            # Read and update hash in chunks of 4K
-            for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
-    
-    async def _get_gemini_files(self, file_paths):
-        """Upload files to Gemini API and return file objects."""
-        gemini_files = []
-        
-        # Create user directory if it doesn't exist
+    def _get_file_mapping(self):
+        """Get the file mapping for a user."""
         user_dir = f"user_files/{self.user_id}"
         os.makedirs(user_dir, exist_ok=True)
         
-        # Path to the file mapping JSON
         mapping_file = f"{user_dir}/file_mapping.json"
         
         # Load existing mapping if it exists
         file_mapping = {}
         if os.path.exists(mapping_file):
+            # Check if file is older than 1 hour
+            file_mod_time = os.path.getmtime(mapping_file)
+            current_time = time.time()
+            one_hour_in_seconds = 3600
+            
+            if current_time - file_mod_time > one_hour_in_seconds:
+                # File is older than 1 hour, return empty mapping
+                print(f"Mapping file for user {self.user_id} is older than 1 hour, clearing cache")
+                return {}, mapping_file
+            
+            # File is recent, load it
             with open(mapping_file, 'r') as f:
                 file_mapping = json.load(f)
+                
+        return file_mapping, mapping_file
+    
+    def _save_file_mapping(self, mapping_file, file_mapping):
+        """Save the file mapping to disk."""
+        with open(mapping_file, 'w') as f:
+            json.dump(file_mapping, f)
+    
+    def _get_file_path(self, file_id):
+        """Get the filepath from a Gemini file ID."""
+        file_mapping, _ = self._get_file_mapping()
+        
+        # Reverse lookup: find filepath by Gemini file ID
+        for filepath, gemini_id in file_mapping.items():
+            if gemini_id.removeprefix("files/") == file_id.removeprefix("files/"):
+                return filepath
+        
+        return None
+    
+    async def _get_gemini_files(self, file_paths):
+        """Upload files to Gemini API and return file objects."""
+        gemini_files = []
+        
+        # Get file mapping
+        file_mapping, mapping_file = self._get_file_mapping()
         
         # Process each file
         for filepath in file_paths:
-            # Calculate file hash
-            file_hash = await self._get_file_hash(filepath)
-            
             # Check if file is already uploaded
-            if file_hash in file_mapping:
+            if filepath in file_mapping:
                 print(f"Using existing Gemini file for {filepath}")
-                gemini_files.append(file_mapping[file_hash])
+                file_uri = file_mapping[filepath]
+                gemini_files.append(self.client.files.get(name=file_uri))
             else:
                 # Upload file to Gemini
                 print(f"Uploading {filepath} to Gemini")
                 gemini_file = self.client.files.upload(file=filepath)
                 
                 # Store the mapping
-                file_mapping[file_hash] = gemini_file.name
-                gemini_files.append(gemini_file.name)
+                file_mapping[filepath] = gemini_file.name
+                gemini_files.append(gemini_file)
         
         # Save updated mapping
-        with open(mapping_file, 'w') as f:
-            json.dump(file_mapping, f)
+        self._save_file_mapping(mapping_file, file_mapping)
 
         return gemini_files
         
@@ -530,14 +481,14 @@ Evaluate the student's answer and provide detailed feedback."""
                     return command, None
         return Command.NONE, message_content
         
-    async def _handle_question(self, question, goal, pdf_files=None):
+    async def _handle_question(self, state, question):
         """Handle a question from the user about the goal"""
         content = f"Answer this question concisely within 2000 characters: {question}"
         print("responding to question")
         
         contents = []
-        if pdf_files:
-            gemini_files = await self._get_gemini_files(pdf_files)
+        if state["pdf_files"]:
+            gemini_files = await self._get_gemini_files(state["pdf_files"])
             for gemini_file in gemini_files:
                 contents.append(gemini_file)
         contents.append(content)
@@ -560,7 +511,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         if state["goal"]:
             state["state"] = UserState.ASKING_QUESTION
-            state["question"], state["correct_answers"], _ = await self._generate_question(state["goal"], question_history=None, pdf_files=state["pdf_files"])
+            state["question"], state["correct_answers"] = await self._generate_question(state)
             return state["question"]
         return "What learning goal would you like to set for this session? Use `!goal [learning goal]`"
         
@@ -569,7 +520,7 @@ Evaluate the student's answer and provide detailed feedback."""
         state["goal"] = message_content
         state["state"] = UserState.ASKING_QUESTION
         
-        state["question"], state["correct_answers"], _ = await self._generate_question(message_content, question_history=None, pdf_files=state["pdf_files"])
+        state["question"], state["correct_answers"] = await self._generate_question(state)
         return state["question"]
         
     async def _handle_question_answer(self, user_answer, state):
@@ -624,35 +575,16 @@ Evaluate the student's answer and provide detailed feedback."""
             
             feedback += response.text
             
-            # Identify the concept being tested
-            concept_prompt = f"Based on this question, what specific concept is being tested?\nQuestion: {question_text}\n\nProvide a short, specific concept name (1-5 words)."
-            
-            concept_response = self.client.models.generate_content(
-                model=MODEL,
-                contents=[concept_prompt],
-                config={
-                    "max_output_tokens": 50,
-                    "temperature": 0.2
-                }
-            )
-            
-            concept = concept_response.text.strip()
-            
             # Update history
             state["question_history"].append({
                 "question": state["question"],
                 "user_answer": "NOT SURE",
                 "correct_answers": correct_answers,
-                "concept": concept,
                 "is_correct": False
             })
             
             # Generate next question
-            state["question"], state["correct_answers"], concept_tested = await self._generate_question(
-                state["goal"], 
-                state["question_history"],
-                state["pdf_files"]
-            )
+            state["question"], state["correct_answers"] = await self._generate_question(state)
             
             # Prepare response text
             response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
@@ -688,11 +620,10 @@ Evaluate the student's answer and provide detailed feedback."""
         eval_response = await self._evaluate_answer(state["question"], user_answer_display, correct_answers, pdf_files=state["pdf_files"])
         
         if eval_response is None:
-            state["question"], state["correct_answers"], _ = await self._generate_question(state["goal"], question_history=state["question_history"], pdf_files=state["pdf_files"])
+            state["question"], state["correct_answers"] = await self._generate_question(state)
             return f"Sorry, I couldn't grade your response.\n\nHere's a new question:\n{state['question']}"
         
         is_correct = eval_response["correct"]
-        concept = eval_response["concept"]
         feedback = eval_response["feedback"]
         
         # Update history
@@ -700,16 +631,11 @@ Evaluate the student's answer and provide detailed feedback."""
             "question": state["question"],
             "user_answer": user_answer_display,
             "correct_answers": correct_answers,
-            "concept": concept,
             "is_correct": is_correct
         })
         
         # Generate next question focusing on weak areas
-        state["question"], state["correct_answers"], concept_tested = await self._generate_question(
-            state["goal"], 
-            state["question_history"],
-            state["pdf_files"]
-        )
+        state["question"], state["correct_answers"] = await self._generate_question(state)
         # Add information about multiple answers if applicable
         multiple_answers_text = ""
         if len(state["correct_answers"]) > 1:
@@ -737,7 +663,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         for attachment in message.attachments:
             if attachment.filename.lower().endswith('.pdf'):
-                filepath = await self._save_attachment(attachment, user_id)
+                filepath = await self._save_attachment(attachment)
                 state["pdf_files"].append(filepath)
                 pdf_files.append(filepath)
         
@@ -886,7 +812,7 @@ Evaluate the student's answer and provide detailed feedback."""
             
         if command == Command.ASK:
             if state["goal"]:
-                return await self._handle_question(argument, state["goal"], state["pdf_files"])
+                return await self._handle_question(state, argument)
             else:
                 return "Please set a goal first using `!goal [learning goal]`"
         
