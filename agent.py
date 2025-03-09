@@ -79,7 +79,7 @@ class Command(Enum):
 
 class InitialView(View):
     def __init__(self, agent):
-        super().__init__(timeout=None)  # Buttons won't timeout
+        super().__init__(timeout=None)
         self.agent = agent
 
     @discord.ui.button(label="Set Learning Goal", style=discord.ButtonStyle.primary)
@@ -87,23 +87,77 @@ class InitialView(View):
         modal = GoalModal(self.agent)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Upload PDFs", style=discord.ButtonStyle.secondary)
+class PDFOptionView(View):
+    def __init__(self, agent):
+        super().__init__(timeout=None)
+        self.agent = agent
+
+    @discord.ui.button(label="Upload PDF", style=discord.ButtonStyle.secondary)
     async def upload_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(
             "Please upload your PDF files by dragging them here or clicking the upload button.",
             ephemeral=True
         )
 
-    @discord.ui.button(label="Ask Question", style=discord.ButtonStyle.success)
-    async def ask_button(self, interaction: discord.Interaction, button: Button):
-        if not self.agent.conversation_state[str(interaction.user.id)].get("goal"):
-            await interaction.response.send_message(
-                "Please set a learning goal first!",
-                ephemeral=True
-            )
-            return
-        modal = QuestionModal(self.agent)
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary)
+    async def skip_button(self, interaction: discord.Interaction, button: Button):
+        # Move to study mode selection
+        await interaction.response.send_message(
+            "Please select your study mode:",
+            view=StudyModeView(self.agent)
+        )
+        
+    @discord.ui.button(label="Change Learning Goal", style=discord.ButtonStyle.primary)
+    async def change_goal_button(self, interaction: discord.Interaction, button: Button):
+        user_id = str(interaction.user.id)
+        
+        # Reset state but keep PDF files
+        pdf_files = self.agent.conversation_state[user_id].get("pdf_files", [])
+        self.agent.conversation_state[user_id] = {
+            "state": UserState.INITIAL,
+            "goal": None,
+            "question": None,
+            "correct_answers": [],
+            "question_history": [],
+            "pdf_files": pdf_files
+        }
+        
+        # Go back to initial view
+        await interaction.response.send_message(
+            "Let's set a new learning goal.",
+            view=InitialView(self.agent)
+        )
+
+class StudyModeView(View):
+    def __init__(self, agent):
+        super().__init__(timeout=None)
+        self.agent = agent
+
+    @discord.ui.button(label="Start Quiz", style=discord.ButtonStyle.success)
+    async def quiz_button(self, interaction: discord.Interaction, button: Button):
+        modal = QuizDurationModal(self.agent)
         await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="General Practice", style=discord.ButtonStyle.primary)
+    async def practice_button(self, interaction: discord.Interaction, button: Button):
+        user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
+        
+        # Generate first question
+        question, correct_answers, _ = await self.agent._generate_question(
+            state["goal"],
+            state["question_history"],
+            state["pdf_files"]
+        )
+        
+        state["question"] = question
+        state["correct_answers"] = correct_answers
+        state["state"] = UserState.ASKING_QUESTION
+        
+        # Create MCQ view with end session button
+        view = PracticeMCQView(self.agent, question, correct_answers)
+        
+        await interaction.response.send_message(question, view=view)
 
 class GoalModal(discord.ui.Modal):
     def __init__(self, agent):
@@ -120,8 +174,15 @@ class GoalModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
         state = self.agent.conversation_state[user_id]
-        response = await self.agent._handle_goal_switch(state, self.goal.value)
-        await interaction.response.send_message(response)
+        
+        # Update the state with the new goal
+        state["goal"] = self.goal.value
+        
+        # Show PDF upload option
+        await interaction.response.send_message(
+            f"Learning goal set: {self.goal.value}\n\nWould you like to upload a PDF to study from?",
+            view=PDFOptionView(self.agent)
+        )
 
 class QuestionModal(discord.ui.Modal):
     def __init__(self, agent):
@@ -145,6 +206,538 @@ class QuestionModal(discord.ui.Modal):
             state["pdf_files"]
         )
         await interaction.response.send_message(response)
+
+class FeedbackView(View):
+    def __init__(self, agent, next_question, next_correct_answers):
+        super().__init__(timeout=None)
+        self.agent = agent
+        self.next_question = next_question
+        self.next_correct_answers = next_correct_answers
+
+    @discord.ui.button(label="Next Question", style=discord.ButtonStyle.primary)
+    async def next_question_button(self, interaction: discord.Interaction, button: Button):
+        # Create view for next question
+        view = PracticeMCQView(self.agent, self.next_question, self.next_correct_answers)
+        
+        # Update the user's state with the new question
+        user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
+        state["question"] = self.next_question
+        state["correct_answers"] = self.next_correct_answers
+        
+        await interaction.response.send_message(self.next_question, view=view)
+
+    @discord.ui.button(label="Ask Follow-up Question", style=discord.ButtonStyle.success)
+    async def followup_button(self, interaction: discord.Interaction, button: Button):
+        modal = FollowUpQuestionModal(self.agent, self.next_question, self.next_correct_answers)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="End Session", style=discord.ButtonStyle.danger)
+    async def end_session_button(self, interaction: discord.Interaction, button: Button):
+        user_id = str(interaction.user.id)
+        
+        # Generate learning summary before resetting state
+        summary = await self._generate_learning_summary(self.agent.conversation_state[user_id])
+        
+        # Reset state but keep PDF files
+        pdf_files = self.agent.conversation_state[user_id].get("pdf_files", [])
+        self.agent.conversation_state[user_id] = {
+            "state": UserState.INITIAL,
+            "goal": None,
+            "question": None,
+            "correct_answers": [],
+            "question_history": [],
+            "pdf_files": pdf_files
+        }
+        
+        # Show summary and initial view
+        await interaction.response.send_message(
+            f"**Learning Session Summary**\n\n{summary}\n\nSession ended. What would you like to do next?",
+            view=InitialView(self.agent)
+        )
+    
+    async def _generate_learning_summary(self, state):
+        """Generate a summary of the learning session"""
+        question_history = state.get("question_history", [])
+        goal = state.get("goal", "Unknown topic")
+        
+        if not question_history:
+            return "No questions were answered in this session."
+        
+        # Calculate statistics
+        total_questions = len(question_history)
+        correct_answers = sum(1 for q in question_history if q.get("is_correct", False))
+        incorrect_answers = total_questions - correct_answers
+        accuracy = (correct_answers / total_questions) * 100 if total_questions > 0 else 0
+        
+        # Collect concepts that were answered incorrectly
+        incorrect_concepts = {}
+        for q in question_history:
+            if not q.get("is_correct", False):
+                concept = q.get("concept", "Unknown concept")
+                incorrect_concepts[concept] = incorrect_concepts.get(concept, 0) + 1
+        
+        # Sort concepts by frequency
+        review_concepts = sorted(incorrect_concepts.items(), key=lambda x: x[1], reverse=True)
+        
+        # Build summary text
+        summary = [
+            f"**Topic:** {goal}",
+            f"**Questions Answered:** {total_questions}",
+            f"**Correct Answers:** {correct_answers}",
+            f"**Incorrect Answers:** {incorrect_answers}",
+            f"**Accuracy:** {accuracy:.1f}%",
+        ]
+        
+        # Add review recommendations if there were incorrect answers
+        if incorrect_answers > 0:
+            summary.append("\n**Concepts to Review:**")
+            for concept, count in review_concepts:
+                summary.append(f"• {concept} ({count} incorrect)")
+        
+        # Generate personalized feedback using Gemini
+        if total_questions >= 3:  # Only generate AI feedback if enough questions were answered
+            try:
+                # Create a prompt for Gemini
+                concepts_tested = [q.get("concept", "Unknown") for q in question_history]
+                correct_concepts = [q.get("concept", "Unknown") for q in question_history if q.get("is_correct", False)]
+                incorrect_concepts = [q.get("concept", "Unknown") for q in question_history if not q.get("is_correct", False)]
+                
+                prompt = (
+                    f"The student has completed a learning session on '{goal}'.\n\n"
+                    f"They answered {total_questions} questions with {correct_answers} correct and {incorrect_answers} incorrect.\n\n"
+                    f"Concepts tested: {', '.join(set(concepts_tested))}\n"
+                    f"Concepts they understood well: {', '.join(set(correct_concepts))}\n"
+                    f"Concepts they struggled with: {', '.join(set(incorrect_concepts))}\n\n"
+                    f"Please provide a brief, encouraging summary (2-3 sentences) of their performance and 1-2 specific suggestions for what to focus on next."
+                )
+                
+                response = self.agent.client.models.generate_content(
+                    model=MODEL,
+                    contents=[prompt],
+                    config={
+                        "max_output_tokens": 200,
+                        "temperature": 0.7
+                    }
+                )
+                
+                summary.append(f"\n**AI Feedback:**\n{response.text}")
+            except Exception as e:
+                print(f"Error generating AI feedback: {e}")
+        
+        return "\n".join(summary)
+
+class FollowUpQuestionModal(discord.ui.Modal):
+    def __init__(self, agent, next_question, next_correct_answers):
+        super().__init__(title="Ask a Follow-up Question")
+        self.agent = agent
+        self.next_question = next_question
+        self.next_correct_answers = next_correct_answers
+        
+        self.question = discord.ui.TextInput(
+            label="What's your follow-up question?",
+            placeholder="Enter your question...",
+            required=True,
+            max_length=1000,
+            style=discord.TextStyle.paragraph
+        )
+        self.add_item(self.question)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Acknowledge the interaction immediately to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
+            user_id = str(interaction.user.id)
+            state = self.agent.conversation_state[user_id]
+            
+            # Create a simpler prompt without trying to get previous feedback
+            custom_prompt = (
+                f"The student is learning about {state['goal']} and has asked a follow-up question about the previous question.\n\n"
+                f"Previous question: {state['question']}\n\n"
+                f"Follow-up question: {self.question.value}\n\n"
+                f"Please answer this follow-up question clearly and concisely, addressing the specific points of confusion."
+            )
+            
+            # Handle the follow-up question with the custom prompt
+            response = self.agent.client.models.generate_content(
+                model=MODEL,
+                contents=[custom_prompt],
+                config={
+                    "max_output_tokens": 500,
+                    "temperature": 0.7
+                }
+            )
+            
+            response_text = response.text
+            
+            # Create feedback view for next steps
+            view = FeedbackView(self.agent, self.next_question, self.next_correct_answers)
+            
+            # Use followup.send instead of response.send_message since we deferred
+            await interaction.followup.send(response_text, view=view)
+            
+        except Exception as e:
+            # If any error occurs, send a simple error message
+            print(f"Error in follow-up question: {e}")
+            
+            # Use followup.send since we deferred the response
+            await interaction.followup.send(
+                "I'm sorry, I encountered an error processing your follow-up question. Please try again with a different question.",
+                ephemeral=True
+            )
+
+class MCQView(View):
+    def __init__(self, agent, question_text: str, correct_answers: list):
+        super().__init__(timeout=None)
+        self.agent = agent
+        self.question_text = question_text
+        self.correct_answers = correct_answers
+
+    @discord.ui.button(label="A", style=discord.ButtonStyle.secondary, custom_id="mcq_A")
+    async def button_a(self, interaction: discord.Interaction, button: Button):
+        await self._handle_answer(interaction, "A")
+
+    @discord.ui.button(label="B", style=discord.ButtonStyle.secondary, custom_id="mcq_B")
+    async def button_b(self, interaction: discord.Interaction, button: Button):
+        await self._handle_answer(interaction, "B")
+
+    @discord.ui.button(label="C", style=discord.ButtonStyle.secondary, custom_id="mcq_C")
+    async def button_c(self, interaction: discord.Interaction, button: Button):
+        await self._handle_answer(interaction, "C")
+
+    @discord.ui.button(label="D", style=discord.ButtonStyle.secondary, custom_id="mcq_D")
+    async def button_d(self, interaction: discord.Interaction, button: Button):
+        await self._handle_answer(interaction, "D")
+
+    @discord.ui.button(label="Not Sure", style=discord.ButtonStyle.danger, custom_id="mcq_not_sure")
+    async def button_not_sure(self, interaction: discord.Interaction, button: Button):
+        await self._handle_answer(interaction, "NOT SURE")
+
+    async def _handle_answer(self, interaction: discord.Interaction, answer: str):
+        # Acknowledge the interaction immediately
+        await interaction.response.defer()
+        
+        user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
+        
+        # Get feedback for the answer
+        response = await self.agent._handle_question_answer(answer, state)
+        
+        # Generate next question (but don't show it yet)
+        next_question, next_correct_answers, _ = await self.agent._generate_question(
+            state["goal"],
+            state["question_history"],
+            state["pdf_files"]
+        )
+        
+        # Create feedback view with options
+        view = FeedbackView(self.agent, next_question, next_correct_answers)
+        
+        # Send feedback with options but NOT the next question
+        await interaction.followup.send(response, view=view)
+
+class ResponseView(View):
+    def __init__(self, agent):
+        super().__init__(timeout=None)
+        self.agent = agent
+
+    @discord.ui.button(label="Set New Goal", style=discord.ButtonStyle.primary)
+    async def goal_button(self, interaction: discord.Interaction, button: Button):
+        modal = GoalModal(self.agent)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Start Quiz", style=discord.ButtonStyle.success)
+    async def quiz_button(self, interaction: discord.Interaction, button: Button):
+        user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
+        
+        if not state.get("goal"):
+            await interaction.response.send_message(
+                "Please set a learning goal first!",
+                ephemeral=True
+            )
+            return
+            
+        modal = QuizDurationModal(self.agent)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Upload PDFs", style=discord.ButtonStyle.secondary)
+    async def upload_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message(
+            "Please upload your PDF files by dragging them here or clicking the upload button.",
+            ephemeral=True
+        )
+
+class QuizMCQView(MCQView):
+    """Extends MCQView to include a timer display for quizzes"""
+    def __init__(self, agent, question_text: str, correct_answers: list, quiz_state: QuizState):
+        super().__init__(agent, question_text, correct_answers)
+        self.quiz_state = quiz_state
+        
+        # Add a timer display to the question text
+        self.question_with_timer = f"Time remaining: {quiz_state.format_time_remaining()}\n\n{question_text}"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Check if the quiz has expired before processing any button interaction"""
+        user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
+        quiz_state = state.get("quiz_state")
+        
+        if quiz_state and quiz_state.is_finished():
+            # Quiz has expired, end it automatically
+            response = await self.agent._grade_quiz(quiz_state)
+            
+            # Reset state but keep PDF files
+            pdf_files = state.get("pdf_files", [])
+            self.agent.conversation_state[user_id] = {
+                "state": UserState.INITIAL,
+                "goal": None,
+                "question": None,
+                "correct_answers": [],
+                "question_history": [],
+                "pdf_files": pdf_files,
+                "quiz_state": None
+            }
+            
+            # Show quiz results and initial view
+            await interaction.response.send_message(
+                f"{response}\n\nTime's up! Quiz has ended. What would you like to do next?",
+                view=InitialView(self.agent)
+            )
+            return False  # Prevent the original button callback from running
+            
+        return True  # Allow the interaction to proceed
+
+    @discord.ui.button(label="End Quiz", style=discord.ButtonStyle.danger, custom_id="end_quiz")
+    async def end_quiz_button(self, interaction: discord.Interaction, button: Button):
+        user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
+        
+        # Grade the quiz
+        response = await self.agent._grade_quiz(state["quiz_state"])
+        
+        # Reset state but keep PDF files
+        pdf_files = state.get("pdf_files", [])
+        self.agent.conversation_state[user_id] = {
+            "state": UserState.INITIAL,
+            "goal": None,
+            "question": None,
+            "correct_answers": [],
+            "question_history": [],
+            "pdf_files": pdf_files
+        }
+        
+        # Show quiz results and initial view
+        await interaction.response.send_message(
+            f"{response}\n\nQuiz ended. What would you like to do next?",
+            view=InitialView(self.agent)
+        )
+    
+    async def _handle_answer(self, interaction: discord.Interaction, answer: str):
+        # Acknowledge the interaction immediately
+        await interaction.response.defer()
+        
+        user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
+        quiz_state = state["quiz_state"]
+        
+        # Check if quiz time has expired
+        if quiz_state.is_finished():
+            # Quiz is over, grade it
+            state["state"] = UserState.INITIAL
+            response = await self.agent._grade_quiz(quiz_state)
+            
+            # Reset state but keep PDF files
+            pdf_files = state.get("pdf_files", [])
+            self.agent.conversation_state[user_id] = {
+                "state": UserState.INITIAL,
+                "goal": None,
+                "question": None,
+                "correct_answers": [],
+                "question_history": [],
+                "pdf_files": pdf_files,
+                "quiz_state": None
+            }
+            
+            await interaction.followup.send(
+                f"{response}\n\nTime's up! Quiz has ended. What would you like to do next?", 
+                view=InitialView(self.agent)
+            )
+            return
+        
+        # Record the answer
+        quiz_state.user_answers.append(answer)
+        
+        # Generate next question
+        question, correct_answers, concept = await self.agent._generate_question(
+            state["goal"],
+            state["question_history"],
+            state["pdf_files"]
+        )
+        
+        # Store the question
+        quiz_state.questions.append((question, correct_answers, concept))
+        
+        # Create view for next question with updated timer
+        next_view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
+        
+        # Show time remaining with each question
+        await interaction.followup.send(next_view.question_with_timer, view=next_view)
+
+class QuizDurationModal(discord.ui.Modal):
+    def __init__(self, agent):
+        super().__init__(title="Start Quiz")
+        self.agent = agent
+        self.duration = discord.ui.TextInput(
+            label="Quiz Duration (minutes)",
+            placeholder="Enter duration (1-60 minutes)",
+            required=True,
+            max_length=2
+        )
+        self.add_item(self.duration)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            duration = int(self.duration.value)
+            if duration < 1 or duration > 60:
+                await interaction.response.send_message(
+                    "Quiz duration must be between 1 and 60 minutes.",
+                    ephemeral=True
+                )
+                return
+                
+            user_id = str(interaction.user.id)
+            state = self.agent.conversation_state[user_id]
+            
+            # Initialize quiz state
+            quiz_state = QuizState(duration, state["goal"])
+            state["quiz_state"] = quiz_state
+            state["state"] = UserState.IN_QUIZ
+            
+            # Generate first question
+            question, correct_answers, concept = await self.agent._generate_question(
+                state["goal"],
+                state["question_history"],
+                state["pdf_files"]
+            )
+            
+            quiz_state.questions.append((question, correct_answers, concept))
+            
+            # Create MCQ view for quiz with timer display
+            view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
+            
+            # Use the question_with_timer property that includes the timer
+            await interaction.response.send_message(
+                f"Starting {duration}-minute quiz on {state['goal']}\n\n{view.question_with_timer}",
+                view=view
+            )
+            
+        except ValueError:
+            await interaction.response.send_message(
+                "Please enter a valid number between 1 and 60.",
+                ephemeral=True
+            )
+
+class PracticeMCQView(MCQView):
+    def __init__(self, agent, question_text: str, correct_answers: list):
+        super().__init__(agent, question_text, correct_answers)
+    
+    @discord.ui.button(label="End Session", style=discord.ButtonStyle.danger, custom_id="end_session")
+    async def end_session_button(self, interaction: discord.Interaction, button: Button):
+        user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
+        
+        # Generate learning summary before resetting state
+        summary = await self._generate_learning_summary(state)
+        
+        # Reset state but keep PDF files
+        pdf_files = state.get("pdf_files", [])
+        self.agent.conversation_state[user_id] = {
+            "state": UserState.INITIAL,
+            "goal": None,
+            "question": None,
+            "correct_answers": [],
+            "question_history": [],
+            "pdf_files": pdf_files
+        }
+        
+        # Show summary and initial view
+        await interaction.response.send_message(
+            f"**Learning Session Summary**\n\n{summary}\n\nSession ended. What would you like to do next?",
+            view=InitialView(self.agent)
+        )
+    
+    async def _generate_learning_summary(self, state):
+        """Generate a summary of the learning session"""
+        question_history = state.get("question_history", [])
+        goal = state.get("goal", "Unknown topic")
+        
+        if not question_history:
+            return "No questions were answered in this session."
+        
+        # Calculate statistics
+        total_questions = len(question_history)
+        correct_answers = sum(1 for q in question_history if q.get("is_correct", False))
+        incorrect_answers = total_questions - correct_answers
+        accuracy = (correct_answers / total_questions) * 100 if total_questions > 0 else 0
+        
+        # Collect concepts that were answered incorrectly
+        incorrect_concepts = {}
+        for q in question_history:
+            if not q.get("is_correct", False):
+                concept = q.get("concept", "Unknown concept")
+                incorrect_concepts[concept] = incorrect_concepts.get(concept, 0) + 1
+        
+        # Sort concepts by frequency
+        review_concepts = sorted(incorrect_concepts.items(), key=lambda x: x[1], reverse=True)
+        
+        # Build summary text
+        summary = [
+            f"**Topic:** {goal}",
+            f"**Questions Answered:** {total_questions}",
+            f"**Correct Answers:** {correct_answers}",
+            f"**Incorrect Answers:** {incorrect_answers}",
+            f"**Accuracy:** {accuracy:.1f}%",
+        ]
+        
+        # Add review recommendations if there were incorrect answers
+        if incorrect_answers > 0:
+            summary.append("\n**Concepts to Review:**")
+            for concept, count in review_concepts:
+                summary.append(f"• {concept} ({count} incorrect)")
+        
+        # Generate personalized feedback using Gemini
+        if total_questions >= 3:  # Only generate AI feedback if enough questions were answered
+            try:
+                # Create a prompt for Gemini
+                concepts_tested = [q.get("concept", "Unknown") for q in question_history]
+                correct_concepts = [q.get("concept", "Unknown") for q in question_history if q.get("is_correct", False)]
+                incorrect_concepts = [q.get("concept", "Unknown") for q in question_history if not q.get("is_correct", False)]
+                
+                prompt = (
+                    f"The student has completed a learning session on '{goal}'.\n\n"
+                    f"They answered {total_questions} questions with {correct_answers} correct and {incorrect_answers} incorrect.\n\n"
+                    f"Concepts tested: {', '.join(set(concepts_tested))}\n"
+                    f"Concepts they understood well: {', '.join(set(correct_concepts))}\n"
+                    f"Concepts they struggled with: {', '.join(set(incorrect_concepts))}\n\n"
+                    f"Please provide a brief, encouraging summary (2-3 sentences) of their performance and 1-2 specific suggestions for what to focus on next."
+                )
+                
+                response = self.agent.client.models.generate_content(
+                    model=MODEL,
+                    contents=[prompt],
+                    config={
+                        "max_output_tokens": 200,
+                        "temperature": 0.7
+                    }
+                )
+                
+                summary.append(f"\n**AI Feedback:**\n{response.text}")
+            except Exception as e:
+                print(f"Error generating AI feedback: {e}")
+        
+        return "\n".join(summary)
 
 class StudyAgent:
     def __init__(self):
@@ -349,7 +942,6 @@ class StudyAgent:
         # Extract the concept being tested
         concept_tested = question_data.get('concept_tested', 'Unknown')
         
-        # Return the formatted question, correct answers, and concept tested
         return formatted_question, question_data['correct_answers'], concept_tested
 
     async def _evaluate_answer(self, question: str, user_answer: str, correct_answers: list, pdf_files=None):
@@ -450,7 +1042,6 @@ Evaluate the student's answer and provide detailed feedback."""
 
     def _initialize_state(self, user_id: str):
         """Initialize conversation state for a new user."""
-
         self.user_id = user_id
 
         # Check for existing PDF files in the user's directory
@@ -481,14 +1072,9 @@ Evaluate the student's answer and provide detailed feedback."""
         if pdf_files:
             pdf_message = f"\n\nI found {len(pdf_files)} previously uploaded PDF document(s). You can use `!goal [learning goal]` to start learning from these materials."
             
-        message = (
-            "How can I help you learn today? Select an option below:\n\n"
-            "• Set a learning goal to begin studying\n"
-            "• Upload PDF documents to study from\n"
-            "• Ask questions about your current goal"
-        )
+        message = "Welcome! Let's start by setting a learning goal."
         
-        # Create a view with buttons
+        # Create a view with just the goal button
         view = InitialView(self)
         
         return message, view
@@ -565,8 +1151,7 @@ Evaluate the student's answer and provide detailed feedback."""
                     types.Part.from_bytes(
                         data=pathlib.Path(pdf_path).read_bytes(),
                         mime_type='application/pdf',
-                    )
-                )
+                    ))
         return contents
     
     def _parse_command(self, message_content):
@@ -605,7 +1190,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
     async def _handle_question(self, question, goal, pdf_files=None):
         """Handle a question from the user about the goal"""
-        content = f"Answer this question concisely within 2000 characters: {question}"
+        content = f"The student is learning about {goal} and has asked: {question}\n\nPlease answer this question concisely within 2000 characters."
         print("responding to question")
         
         contents = []
@@ -624,7 +1209,7 @@ Evaluate the student's answer and provide detailed feedback."""
             }
         )
         
-        return response.text
+        return response.text, ResponseView(self)  # Return both response and view
         
     async def _handle_goal_switch(self, state, new_goal):
         """Handle a goal switch from the user"""
@@ -633,8 +1218,19 @@ Evaluate the student's answer and provide detailed feedback."""
         
         if state["goal"]:
             state["state"] = UserState.ASKING_QUESTION
-            state["question"], state["correct_answers"], _ = await self._generate_question(state["goal"], question_history=None, pdf_files=state["pdf_files"])
-            return state["question"]
+            question, correct_answers, _ = await self._generate_question(
+                state["goal"], 
+                question_history=None, 
+                pdf_files=state["pdf_files"]
+            )
+            state["question"] = question
+            state["correct_answers"] = correct_answers
+            
+            # Create MCQ view
+            view = MCQView(self, question, correct_answers)
+            
+            # Return both the question and view
+            return question, view
         return "What learning goal would you like to set for this session? Use `!goal [learning goal]`"
         
     async def _handle_initial_state(self, message_content, state):
@@ -645,103 +1241,59 @@ Evaluate the student's answer and provide detailed feedback."""
         state["question"], state["correct_answers"], _ = await self._generate_question(message_content, question_history=None, pdf_files=state["pdf_files"])
         return state["question"]
         
-    async def _handle_question_answer(self, user_answer, state):
-        """Handle when user is answering a question"""
-        # Handle "not sure" response
+    async def _handle_question_answer(self, user_answer, state, pdf_files=None):
+        """Handle an answer from the user"""
+        # If we're in a quiz, handle differently
+        if state["state"] == UserState.IN_QUIZ:
+            return await self._handle_quiz_answer(user_answer, state)
+        
+        # Get PDF files if not provided
+        if pdf_files is None:
+            pdf_files = state.get("pdf_files", [])
+        
+        # Handle "not sure" answer
         if user_answer == "NOT SURE":
-            # Generate feedback for "not sure" response
-            correct_answers = state["correct_answers"]
-            
-            # Format correct answers for display
-            if len(correct_answers) == 1:
-                correct_answers_display = correct_answers[0]
-            else:
-                correct_answers_display = ", ".join(correct_answers)
-            
-            feedback = f"The correct answer{'s' if len(correct_answers) > 1 else ''} {'are' if len(correct_answers) > 1 else 'is'}: {correct_answers_display}. Let me explain:\n\n"
-            
-            # Add explanation based on the options
-            question_parts = state["question"].split("\n\n")
-            question_text = question_parts[0]
-            options = question_parts[1].split("\n")
-            
-            # Find the correct option text for all correct answers
-            correct_options_text = []
-            for correct_answer in correct_answers:
-                for option in options:
-                    if option.startswith(f"{correct_answer})"):
-                        correct_options_text.append(f"{correct_answer}) {option[3:].strip()}")
-                        break
-            
-            # Generate an explanation
-            content = f"Question: {question_text}\nCorrect answer{'s' if len(correct_answers) > 1 else ''}: {correct_answers_display}\n"
-            for option_text in correct_options_text:
-                content += f"- {option_text}\n"
-            content += "\nExplain why these are correct concisely within 2000 characters."
-            
-            contents = []
-            if state["pdf_files"]:
-                gemini_files = await self._get_gemini_files(state["pdf_files"])
-                for gemini_file in gemini_files:
-                    contents.append(gemini_file)
-            contents.append(content)
-            
-            response = self.client.models.generate_content(
-                model=MODEL,
-                contents=contents,
-                config={
-                    "max_output_tokens": 250,
-                    "temperature": 0.7
-                }
+            # Generate feedback for skipping
+            eval_response = await self._evaluate_answer(
+                state["question"], 
+                "NOT SURE", 
+                state["correct_answers"],
+                pdf_files
             )
             
-            feedback += response.text
+            if eval_response is None:
+                # If evaluation failed, generate a new question
+                state["question"], state["correct_answers"], _ = await self._generate_question(
+                    state["goal"], 
+                    question_history=state["question_history"],
+                    pdf_files=pdf_files
+                )
+                return "I understand you're not sure about this one. Let's try a different question."
             
-            # Identify the concept being tested
-            concept_prompt = f"Based on this question, what specific concept is being tested?\nQuestion: {question_text}\n\nProvide a short, specific concept name (1-5 words)."
-            
-            concept_response = self.client.models.generate_content(
-                model=MODEL,
-                contents=[concept_prompt],
-                config={
-                    "max_output_tokens": 50,
-                    "temperature": 0.2
-                }
-            )
-            
-            concept = concept_response.text.strip()
-            
-            # Update history
+            # Add to history
             state["question_history"].append({
                 "question": state["question"],
                 "user_answer": "NOT SURE",
-                "correct_answers": correct_answers,
-                "concept": concept,
+                "correct_answers": state["correct_answers"],
+                "concept": eval_response["concept"],
                 "is_correct": False
             })
             
             # Generate next question
-            state["question"], state["correct_answers"], concept_tested = await self._generate_question(
+            state["question"], state["correct_answers"], _ = await self._generate_question(
                 state["goal"], 
-                state["question_history"],
-                state["pdf_files"]
+                question_history=state["question_history"],
+                pdf_files=pdf_files
             )
             
-            # Prepare response text
-            response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
+            # Prepare response with feedback only (no next question)
+            feedback = eval_response["feedback"]
             
-            # Truncate if too long for Discord
-            if len(response_text) > 1900:  # Leave some buffer
-                # Truncate the feedback part while preserving the question and instructions
-                max_feedback_length = 1900 - len(f"\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know.")
-                truncated_feedback = feedback[:max_feedback_length] + "... (feedback truncated)"
-                response_text = f"{truncated_feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
+            # Check if feedback is too long for Discord
+            if len(feedback) > 1900:  # Leave some buffer
+                feedback = feedback[:1900] + "... (feedback truncated)"
             
-            return response_text
-        
-        # Handle invalid answer
-        if user_answer == "INVALID":
-            return f"Invalid answer format. Please use `!answer [letter]` (e.g., `!answer A`) or `!answer [letters]` (e.g., `!answer A,B,C`) or `!answer not sure`.\n\nThe current question is:\n{state['question']}"
+            return feedback
         
         # Handle regular answer
         correct_answers = state["correct_answers"]
@@ -758,11 +1310,11 @@ Evaluate the student's answer and provide detailed feedback."""
         else:
             user_answer_display = ", ".join(sorted(user_answers))
         
-        eval_response = await self._evaluate_answer(state["question"], user_answer_display, correct_answers, pdf_files=state["pdf_files"])
+        eval_response = await self._evaluate_answer(state["question"], user_answer_display, correct_answers, pdf_files=pdf_files)
         
         if eval_response is None:
-            state["question"], state["correct_answers"], _ = await self._generate_question(state["goal"], question_history=state["question_history"], pdf_files=state["pdf_files"])
-            return f"Sorry, I couldn't grade your response.\n\nHere's a new question:\n{state['question']}"
+            state["question"], state["correct_answers"], _ = await self._generate_question(state["goal"], question_history=state["question_history"], pdf_files=pdf_files)
+            return "Sorry, I couldn't grade your response."
         
         is_correct = eval_response["correct"]
         concept = eval_response["concept"]
@@ -777,30 +1329,18 @@ Evaluate the student's answer and provide detailed feedback."""
             "is_correct": is_correct
         })
         
-        # Generate next question focusing on weak areas
-        state["question"], state["correct_answers"], concept_tested = await self._generate_question(
+        # Generate next question focusing on weak areas (but don't include it in the response)
+        state["question"], state["correct_answers"], _ = await self._generate_question(
             state["goal"], 
             state["question_history"],
-            state["pdf_files"]
+            pdf_files
         )
-        # Add information about multiple answers if applicable
-        multiple_answers_text = ""
-        if len(state["correct_answers"]) > 1:
-            multiple_answers_text = " (This question has multiple correct answers. Use `!answer A,B,C` format to select multiple options)"
         
-        # Prepare response text
-        if len(state["correct_answers"]) > 1:
-            response_text = f"{feedback}\n\nNext question{multiple_answers_text}:\n{state['question']}\n\nUse `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
-        else:
-            response_text = f"{feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, or `!answer not sure` if you don't know."
-        # Truncate if too long for Discord
-        if len(response_text) > 1900:  # Leave some buffer
-            # Truncate the feedback part while preserving the question and instructions
-            max_feedback_length = 1900 - len(f"\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know.")
-            truncated_feedback = feedback[:max_feedback_length] + "... (feedback truncated)"
-            response_text = f"{truncated_feedback}\n\nNext question:\n{state['question']}\n\nUse `!answer [letter]` for a single answer, `!answer [letters]` for multiple answers (e.g., `!answer A,B,C`), or `!answer not sure` if you don't know."
+        # Return only the feedback
+        if len(feedback) > 1900:  # Leave some buffer
+            feedback = feedback[:1900] + "... (feedback truncated)"
         
-        return response_text
+        return feedback
 
     async def _handle_pdf_attachments(self, message):
         """Handle PDF attachments from the user"""
@@ -815,98 +1355,92 @@ Evaluate the student's answer and provide detailed feedback."""
                 pdf_files.append(filepath)
         
         if pdf_files:
-            return f"I've received {len(pdf_files)} PDF document(s). I'll use these to help with your learning. Use `!topic [subject]` to start learning about a specific topic from these materials."
+            message_text = f"I've received {len(pdf_files)} PDF document(s). I'll use these to help with your learning.\n\nPlease select your study mode:"
+            view = StudyModeView(self)
+            await message.channel.send(message_text, view=view)
+            return None
         else:
-            return "I can only process PDF files at the moment. Please send PDF documents with the `!upload` command."
+            return "I can only process PDF files at the moment. Please send PDF documents."
 
-    async def _grade_quiz(self, quiz_state: QuizState) -> str:
-        """Grade the quiz and return formatted results"""
-        total_questions = len(quiz_state.questions)
-        if total_questions == 0:
-            return "No questions were answered during the quiz."
-
-        correct_count = 0
-        feedback = []
+    async def _grade_quiz(self, quiz_state):
+        """Grade a completed quiz and provide feedback"""
+        if not quiz_state or not quiz_state.questions:
+            return "No quiz data available to grade."
         
-        for i, (question, user_answer) in enumerate(zip(quiz_state.questions, quiz_state.user_answers), 1):
-            question_text, correct_answers, concept = question
+        total_questions = len(quiz_state.user_answers)
+        correct_count = 0
+        incorrect_questions = []
+        
+        # Grade each question
+        for i, (user_answer, (question, correct_answers, concept)) in enumerate(
+            zip(quiz_state.user_answers, quiz_state.questions)
+        ):
+            # Convert user_answer to list if it's a string (single answer)
+            user_answers = user_answer if isinstance(user_answer, list) else [user_answer]
             
-            # Evaluate the answer
-            eval_result = await self._evaluate_answer(question_text, user_answer, correct_answers)
-            is_correct = eval_result["correct"] if eval_result else False
+            # Check if answer is correct (all required answers are present and no incorrect ones)
+            is_correct = set(user_answers) == set(correct_answers)
             
             if is_correct:
                 correct_count += 1
-            
-            # Format the question result
-            feedback.append(f"\nQuestion {i}:")
-            feedback.append(f"Your answer: {user_answer}")
-            feedback.append(f"Correct answer(s): {', '.join(correct_answers)}")
-            feedback.append(f"{'✅ Correct' if is_correct else '❌ Incorrect'}")
-            if eval_result and eval_result["feedback"]:
-                feedback.append(f"Explanation: {eval_result['feedback']}")
-            feedback.append("")  # Empty line for spacing
-
-        # Calculate score
-        score_percentage = (correct_count / total_questions) * 100
+            else:
+                incorrect_questions.append((i+1, question, user_answers, correct_answers, concept))
         
-        # Prepare summary
-        summary = [
-            f"Quiz Results ({quiz_state.duration_minutes} minutes)",
+        # Calculate score
+        score_percent = (correct_count / total_questions * 100) if total_questions > 0 else 0
+        
+        # Group incorrect questions by concept
+        concept_errors = {}
+        for q_num, question, user_answer, correct_answer, concept in incorrect_questions:
+            if concept not in concept_errors:
+                concept_errors[concept] = []
+            concept_errors[concept].append(q_num)
+        
+        # Build response
+        response = [
+            f"**Quiz Results**",
             f"Topic: {quiz_state.goal}",
-            f"Score: {correct_count}/{total_questions} ({score_percentage:.1f}%)",
-            "\nDetailed Feedback:",
+            f"Score: {correct_count}/{total_questions} ({score_percent:.1f}%)",
+            f"Time: {quiz_state.duration_minutes} minutes",
+            ""
         ]
         
-        # Combine summary and feedback
-        result = "\n".join(summary + feedback)
+        # Add feedback on concepts that need improvement
+        if concept_errors:
+            response.append("**Areas to Review:**")
+            for concept, question_nums in concept_errors.items():
+                q_str = ", ".join([f"#{num}" for num in question_nums])
+                response.append(f"• {concept} (Questions {q_str})")
+            response.append("")
         
-        # If result is too long for Discord, truncate the feedback section
-        if len(result) > 1900:
-            truncated_result = "\n".join(summary)
-            remaining_length = 1900 - len(truncated_result) - len("\n... (some feedback omitted)")
+        # Generate personalized feedback using Gemini
+        try:
+            # Create a prompt for Gemini
+            concepts_tested = [concept for _, _, concept in quiz_state.questions]
+            incorrect_concepts = list(concept_errors.keys())
             
-            # Add as many feedback items as will fit
-            current_length = len(truncated_result)
-            for item in feedback:
-                if current_length + len(item) + 1 < remaining_length:  # +1 for newline
-                    truncated_result += "\n" + item
-                    current_length += len(item) + 1
-                else:
-                    break
+            prompt = (
+                f"The student has completed a quiz on '{quiz_state.goal}'.\n\n"
+                f"They answered {total_questions} questions with {correct_count} correct and {total_questions - correct_count} incorrect.\n\n"
+                f"Concepts tested: {', '.join(set(concepts_tested))}\n"
+                f"Concepts they struggled with: {', '.join(incorrect_concepts)}\n\n"
+                f"Please provide a brief, encouraging summary (2-3 sentences) of their performance and 1-2 specific suggestions for what to focus on next."
+            )
             
-            result = truncated_result + "\n... (some feedback omitted)"
+            ai_response = self.client.models.generate_content(
+                model=MODEL,
+                contents=[prompt],
+                config={
+                    "max_output_tokens": 200,
+                    "temperature": 0.7
+                }
+            )
+            
+            response.append(f"**AI Feedback:**\n{ai_response.text}")
+        except Exception as e:
+            print(f"Error generating AI feedback: {e}")
         
-        return result
-
-    async def _handle_quiz_command(self, duration_minutes: int, state: dict) -> str:
-        """Handle the quiz command"""
-        if not state["goal"]:
-            return "Please set a learning goal first using `!goal [learning goal]`"
-        
-        if duration_minutes < 1 or duration_minutes > 60:
-            return "Quiz duration must be between 1 and 60 minutes."
-        
-        # Initialize quiz state
-        quiz_state = QuizState(duration_minutes, state["goal"])
-        state["quiz_state"] = quiz_state
-        state["state"] = UserState.IN_QUIZ
-        
-        # Generate first question
-        question, correct_answers, concept = await self._generate_question(
-            state["goal"],
-            state["question_history"],
-            state["pdf_files"]
-        )
-        
-        quiz_state.questions.append((question, correct_answers, concept))
-        
-        return (
-            f"Starting {duration_minutes}-minute quiz on {state['goal']}\n"
-            f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
-            f"{question}\n\n"
-            f"Use `!answer [letter]` to submit your answer. Your answers will be graded when the time expires."
-        )
+        return "\n".join(response)
 
     async def _handle_quiz_answer(self, user_answer: str, state: dict):
         """Handle an answer during a quiz"""
@@ -933,8 +1467,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         return (
             f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
-            f"Next question:\n{question}\n\n"
-            f"Use `!answer [letter]` to submit your answer."
+            f"Next question:\n{question}"
         )
 
     async def run(self, message: discord.Message):
@@ -956,7 +1489,9 @@ Evaluate the student's answer and provide detailed feedback."""
         
         # Handle commands based on type
         if command == Command.GOAL:
-            return await self._handle_goal_switch(state, argument)
+            response, view = await self._handle_goal_switch(state, argument)
+            await message.channel.send(response, view=view)
+            return None
             
         if command == Command.ASK:
             if state["goal"]:
@@ -967,9 +1502,10 @@ Evaluate the student's answer and provide detailed feedback."""
         # Handle quiz command
         if command == Command.QUIZ:
             try:
-                print("!!!!!!", argument)
                 duration = int(argument)
-                return await self._handle_quiz_command(duration, state)
+                response, view = await self._handle_quiz_command(duration, state)
+                await message.channel.send(response, view=view)
+                return None
             except ValueError:
                 return "Invalid quiz duration. Please specify a number of minutes between 1 and 60."
         
