@@ -682,6 +682,7 @@ Evaluate the student's answer and provide detailed feedback."""
 
         correct_count = 0
         feedback = []
+        quiz_state.user_answers.append("None")
         
         for i, (question, user_answer) in enumerate(zip(quiz_state.questions, quiz_state.user_answers), 1):
             question_text, correct_answers = question
@@ -763,12 +764,6 @@ Evaluate the student's answer and provide detailed feedback."""
         """Handle an answer during a quiz"""
         quiz_state = state["quiz_state"]
         
-        # Handle forced grading from timer expiration
-        #if user_answer == "FORCE_GRADE":
-        #    state["state"] = UserState.ASKING_QUESTION
-        #    state["quiz_state"] = None
-        #    return await self._grade_quiz(quiz_state)
-        
         if quiz_state.is_finished():
             # Quiz is over, grade it
             state["state"] = UserState.ASKING_QUESTION
@@ -785,7 +780,7 @@ Evaluate the student's answer and provide detailed feedback."""
         quiz_state.questions.append((question, correct_answers))
         
         return (
-            f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
+            f"Answer recorded. \n\n"
             f"Next question:\n{question}\n\n"
             f"Use `!answer [letter]` to submit your answer."
         )
@@ -843,8 +838,12 @@ Evaluate the student's answer and provide detailed feedback."""
                     return await self._grade_quiz(quiz_state)
                     
                 return result
+
             elif message.content == "!answer FORCE_GRADE":
+                state["state"] = UserState.ASKING_QUESTION
+                state["quiz_state"] = None
                 return await self._grade_quiz(quiz_state)
+                
             else:
                 return "You're currently in a quiz. Use `!answer [letter]` to submit your answer."
             

@@ -205,7 +205,7 @@ async def quiz(ctx, duration: int):
     
     # Send initial quiz message
     quiz_message = await ctx.send(response)
-    
+
     # Get the user's state
     user_id = str(ctx.author.id)
     state = agent.conversation_state.get(user_id)
@@ -215,9 +215,9 @@ async def quiz(ctx, duration: int):
     
     quiz_state = state["quiz_state"]
     
-    # Update timer every 5 seconds until quiz ends
+    # Update timer every 1 seconds until quiz ends
     while not quiz_state.is_finished():
-        await asyncio.sleep(5)  # Wait 5 seconds
+        await asyncio.sleep(1)  # Wait 1 seconds
         
         # Check if quiz is still active
         if state["state"] != UserState.IN_QUIZ or not state["quiz_state"]:
