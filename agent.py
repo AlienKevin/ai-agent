@@ -755,7 +755,8 @@ Evaluate the student's answer and provide detailed feedback."""
         
         return (
             f"Starting {duration_minutes}-minute quiz on {state['goal']}\n"
-            f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
+            #f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
+            f"Time's up <t:{int(time.time()//1 + duration_minutes*60)}:R>  \n\n"
             f"{question}\n\n"
             f"Use `!answer [letter]` to submit your answer. Your answers will be graded when the time expires."
         )
@@ -780,7 +781,8 @@ Evaluate the student's answer and provide detailed feedback."""
         quiz_state.questions.append((question, correct_answers))
         
         return (
-            f"Answer recorded. \n\n"
+            f"Answer recorded. \n"
+            f"Time's up <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>  \n\n"
             f"Next question:\n{question}\n\n"
             f"Use `!answer [letter]` to submit your answer."
         )
@@ -843,7 +845,7 @@ Evaluate the student's answer and provide detailed feedback."""
                 state["state"] = UserState.ASKING_QUESTION
                 state["quiz_state"] = None
                 return await self._grade_quiz(quiz_state)
-                
+
             else:
                 return "You're currently in a quiz. Use `!answer [letter]` to submit your answer."
             

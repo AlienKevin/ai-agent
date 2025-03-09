@@ -215,34 +215,9 @@ async def quiz(ctx, duration: int):
     
     quiz_state = state["quiz_state"]
     
-    # Update timer every 1 seconds until quiz ends
-    while not quiz_state.is_finished():
-        await asyncio.sleep(1)  # Wait 1 seconds
-        
-        # Check if quiz is still active
-        if state["state"] != UserState.IN_QUIZ or not state["quiz_state"]:
-            break
+    # wait until quiz ends
+    await asyncio.sleep(duration*60)
             
-        try:
-            # Get the current message content
-            current_content = quiz_message.content
-            
-            # Split content at "Time remaining:" and keep the first part
-            base_content = current_content.split("Time remaining:")[0]
-            remainder = current_content.split("Time remaining:")[1][6:]
-            
-            # Update the message with new time
-            new_content = f"{base_content}Time remaining: {quiz_state.format_time_remaining()} {remainder}"
-
-            if current_content != new_content:  # Only update if content changed
-                await quiz_message.edit(content=new_content)
-                
-        except discord.NotFound:
-            # Message was deleted
-            break
-        except discord.HTTPException as e:
-            logger.error(f"Failed to update quiz timer: {e}")
-            continue
     
     # If quiz is still active when time expires, grade it
     if state["state"] == UserState.IN_QUIZ and state["quiz_state"]:
