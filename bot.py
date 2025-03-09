@@ -1,6 +1,7 @@
 import os
 import discord
 import logging
+import asyncio
 
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -187,6 +188,56 @@ async def upload(ctx):
     # Process with the agent
     response = await agent.run(ctx.message)
     await ctx.send(response)
+
+
+@bot.command(name="quiz", help="Start a timed quiz on the current topic")
+async def quiz(ctx, *, duration):
+    """Start a timed quiz on the current topic.
+    
+    Args:
+        duration: Number of minutes for the quiz (1-60)
+    """
+    # Modify the message content to use the !quiz command format
+    ctx.message.content = f"!quiz {duration}"
+    
+    # Process with the agent
+    response = await agent.run(ctx.message)
+    
+    # Send initial quiz message
+    quiz_message = await ctx.send(response)
+    
+    # Get the user's state
+    user_id = str(ctx.author.id)
+    state = agent.conversation_state.get(user_id)
+    
+    if not state or "quiz_state" not in state or not state["quiz_state"]:
+        return
+    
+    quiz_state = state["quiz_state"]
+    
+    # Update timer every 15 seconds until quiz ends
+    while not quiz_state.is_finished():
+        await asyncio.sleep(15)  # Wait 15 seconds
+        
+        # Check if quiz is still active
+        if state["state"] != UserState.IN_QUIZ or not state["quiz_state"]:
+            break
+            
+        try:
+            # Update the time remaining
+            await quiz_message.edit(content=f"{quiz_message.content.split('Time remaining:')[0]}"
+                                        f"Time remaining: {quiz_state.format_time_remaining()}")
+        except discord.NotFound:
+            # Message was deleted
+            break
+        except discord.HTTPException:
+            # Failed to edit message
+            continue
+    
+    # If quiz is still active when time expires, grade it
+    if state["state"] == UserState.IN_QUIZ and state["quiz_state"]:
+        response = await agent.run(ctx.message)  # This will trigger grading
+        await ctx.send(response)
 
 
 # Start the bot, connecting it to the gateway

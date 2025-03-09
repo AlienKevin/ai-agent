@@ -1,4 +1,6 @@
 import os
+#import google.generativeai as genai
+#from google.generativeai import types
 from google import genai
 from google.genai import types
 import discord
@@ -7,6 +9,7 @@ import pathlib
 from enum import Enum, auto
 import re
 import hashlib
+import time
 
 MODEL = "gemini-2.0-flash"
 
@@ -32,16 +35,44 @@ SYSTEM_PROMPT = """You are a StudyAgent that helps students learn. Follow these 
 
 Keep track of their performance through question history to adapt questions to their needs. Your goal is to help them master difficult concepts while ensuring comprehensive coverage of the entire goal."""
 
+class QuizState:
+    def __init__(self, duration_minutes: int, goal: str):
+        self.start_time = time.time()
+        self.duration_minutes = duration_minutes
+        self.end_time = self.start_time + (duration_minutes * 60)
+        self.questions = []  # List of (question_text, correct_answers, concept) tuples
+        self.user_answers = []  # List of user's answers
+        self.goal = goal
+        self.current_question_index = 0
+        self.is_active = True
+
+    def time_remaining(self) -> int:
+        """Returns remaining time in seconds"""
+        return max(0, int(self.end_time - time.time()))
+
+    def is_finished(self) -> bool:
+        """Check if quiz time has expired"""
+        return time.time() >= self.end_time
+
+    def format_time_remaining(self) -> str:
+        """Format remaining time as MM:SS"""
+        seconds = self.time_remaining()
+        minutes = seconds // 60
+        seconds = seconds % 60
+        return f"{minutes:02d}:{seconds:02d}"
+
 class UserState(Enum):
     INITIAL = auto()
     ASKING_QUESTION = auto()
     AWAITING_ANSWER = auto()
+    IN_QUIZ = auto()
 
 class Command(Enum):
     ANSWER = "answer"
     ASK = "ask"
     GOAL = "goal"
     UPLOAD = "upload"
+    QUIZ = "quiz"
     NONE = "none"
 
 class StudyAgent:
@@ -52,8 +83,10 @@ class StudyAgent:
             Command.ANSWER: r'!answer\s+([A-Ea-e](?:[,\s]+[A-Ea-e])*|not sure)',
             Command.ASK: r'!ask\s+(.*)',
             Command.GOAL: r'!goal\s+(.*)',
-            Command.UPLOAD: r'!upload'
+            Command.UPLOAD: r'!upload',
+            Command.QUIZ: r'!quiz\s+(\d+)'
         }
+        self.quiz_states = {}  # Store quiz states per user
 
     async def _generate_question(self, goal: str, question_history=None, pdf_files=None):
         """Generate a multiple choice question about the given goal."""
@@ -491,7 +524,7 @@ Evaluate the student's answer and provide detailed feedback."""
                         return command, answer_text
                     return command, "INVALID"
                     
-                elif command in [Command.ASK, Command.GOAL]:
+                elif command in [Command.ASK, Command.GOAL, Command.QUIZ]:
                     return command, match.group(1)
                 else:  # Command.UPLOAD
                     return command, None
@@ -713,6 +746,124 @@ Evaluate the student's answer and provide detailed feedback."""
         else:
             return "I can only process PDF files at the moment. Please send PDF documents with the `!upload` command."
 
+    async def _grade_quiz(self, quiz_state: QuizState) -> str:
+        """Grade the quiz and return formatted results"""
+        total_questions = len(quiz_state.questions)
+        if total_questions == 0:
+            return "No questions were answered during the quiz."
+
+        correct_count = 0
+        feedback = []
+        
+        for i, (question, user_answer) in enumerate(zip(quiz_state.questions, quiz_state.user_answers), 1):
+            question_text, correct_answers, concept = question
+            
+            # Evaluate the answer
+            eval_result = await self._evaluate_answer(question_text, user_answer, correct_answers)
+            is_correct = eval_result["correct"] if eval_result else False
+            
+            if is_correct:
+                correct_count += 1
+            
+            # Format the question result
+            feedback.append(f"\nQuestion {i}:")
+            feedback.append(f"Your answer: {user_answer}")
+            feedback.append(f"Correct answer(s): {', '.join(correct_answers)}")
+            feedback.append(f"{'✅ Correct' if is_correct else '❌ Incorrect'}")
+            if eval_result and eval_result["feedback"]:
+                feedback.append(f"Explanation: {eval_result['feedback']}")
+            feedback.append("")  # Empty line for spacing
+
+        # Calculate score
+        score_percentage = (correct_count / total_questions) * 100
+        
+        # Prepare summary
+        summary = [
+            f"Quiz Results ({quiz_state.duration_minutes} minutes)",
+            f"Topic: {quiz_state.goal}",
+            f"Score: {correct_count}/{total_questions} ({score_percentage:.1f}%)",
+            "\nDetailed Feedback:",
+        ]
+        
+        # Combine summary and feedback
+        result = "\n".join(summary + feedback)
+        
+        # If result is too long for Discord, truncate the feedback section
+        if len(result) > 1900:
+            truncated_result = "\n".join(summary)
+            remaining_length = 1900 - len(truncated_result) - len("\n... (some feedback omitted)")
+            
+            # Add as many feedback items as will fit
+            current_length = len(truncated_result)
+            for item in feedback:
+                if current_length + len(item) + 1 < remaining_length:  # +1 for newline
+                    truncated_result += "\n" + item
+                    current_length += len(item) + 1
+                else:
+                    break
+            
+            result = truncated_result + "\n... (some feedback omitted)"
+        
+        return result
+
+    async def _handle_quiz_command(self, duration_minutes: int, state: dict) -> str:
+        """Handle the quiz command"""
+        if not state["goal"]:
+            return "Please set a learning goal first using `!goal [learning goal]`"
+        
+        if duration_minutes < 1 or duration_minutes > 60:
+            return "Quiz duration must be between 1 and 60 minutes."
+        
+        # Initialize quiz state
+        quiz_state = QuizState(duration_minutes, state["goal"])
+        state["quiz_state"] = quiz_state
+        state["state"] = UserState.IN_QUIZ
+        
+        # Generate first question
+        question, correct_answers, concept = await self._generate_question(
+            state["goal"],
+            state["question_history"],
+            state["pdf_files"]
+        )
+        
+        quiz_state.questions.append((question, correct_answers, concept))
+        
+        return (
+            f"Starting {duration_minutes}-minute quiz on {state['goal']}\n"
+            f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
+            f"{question}\n\n"
+            f"Use `!answer [letter]` to submit your answer. Your answers will be graded when the time expires."
+        )
+
+    async def _handle_quiz_answer(self, user_answer: str, state: dict):
+        """Handle an answer during a quiz"""
+        quiz_state = state["quiz_state"]
+        
+        if quiz_state.is_finished():
+            # Quiz is over, grade it
+            state["state"] = UserState.ASKING_QUESTION
+            state["quiz_state"] = None
+            return await self._grade_quiz(quiz_state)
+        
+        # Record the answer
+        quiz_state.user_answers.append(user_answer)
+        
+        # Generate next question
+        question, correct_answers, concept = await self._generate_question(
+            state["goal"],
+            state["question_history"],
+            state["pdf_files"]
+        )
+        
+        # Store the question
+        quiz_state.questions.append((question, correct_answers, concept))
+        
+        return (
+            f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
+            f"Next question:\n{question}\n\n"
+            f"Use `!answer [letter]` to submit your answer."
+        )
+
     async def run(self, message: discord.Message):
         print("running on message", message.content)
         user_id = str(message.author.id)
@@ -738,7 +889,39 @@ Evaluate the student's answer and provide detailed feedback."""
                 return await self._handle_question(argument, state["goal"], state["pdf_files"])
             else:
                 return "Please set a goal first using `!goal [learning goal]`"
+        
+        # Handle quiz command
+        if command == Command.QUIZ:
+            try:
+                print("!!!!!!", argument)
+                duration = int(argument)
+                return await self._handle_quiz_command(duration, state)
+            except ValueError:
+                return "Invalid quiz duration. Please specify a number of minutes between 1 and 60."
+        
+        # Handle answers during quiz
+        if state["state"] == UserState.IN_QUIZ:
+            quiz_state = state["quiz_state"]
             
+            if command == Command.ANSWER:
+                if argument == "INVALID":
+                    return "Invalid answer format. Please use `!answer [letter]` (e.g., `!answer A`)."
+                
+                result = await self._handle_quiz_answer(argument, state)
+                if result:  # Quiz is finished
+                    return result
+                    
+                # Check if time expired while processing
+                if quiz_state.is_finished():
+                    state["state"] = UserState.ASKING_QUESTION
+                    state["quiz_state"] = None
+                    return await self._grade_quiz(quiz_state)
+                    
+                return result
+            else:
+                return "You're currently in a quiz. Use `!answer [letter]` to submit your answer."
+            
+        # handles answers not part of a quiz
         if command == Command.ANSWER:
             if state["state"] == UserState.ASKING_QUESTION:
                 return await self._handle_question_answer(argument, state)
