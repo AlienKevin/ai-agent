@@ -747,13 +747,9 @@ Evaluate the student's answer and provide detailed feedback."""
         state["state"] = UserState.IN_QUIZ
         
         # Generate first question
-        question, correct_answers, concept = await self._generate_question(
-            state["goal"],
-            state["question_history"],
-            state["pdf_files"]
-        )
+        question, correct_answers = await self._generate_question(state)
         
-        quiz_state.questions.append((question, correct_answers, concept))
+        quiz_state.questions.append((question, correct_answers))
         
         return (
             f"Starting {duration_minutes}-minute quiz on {state['goal']}\n"
@@ -776,14 +772,10 @@ Evaluate the student's answer and provide detailed feedback."""
         quiz_state.user_answers.append(user_answer)
         
         # Generate next question
-        question, correct_answers, concept = await self._generate_question(
-            state["goal"],
-            state["question_history"],
-            state["pdf_files"]
-        )
+        question, correct_answers = await self._generate_question(state)
         
         # Store the question
-        quiz_state.questions.append((question, correct_answers, concept))
+        quiz_state.questions.append((question, correct_answers))
         
         return (
             f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
