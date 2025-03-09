@@ -83,7 +83,7 @@ class StudyAgent:
         
         # Add context about document usage and comprehensive coverage
         if pdf_files and len(pdf_files) > 0:
-            content += f"\n\nBase your question on content from the uploaded documents. These may be lecture slides, past exams, or textbook content. Extract specific concepts, examples, or problems from these materials to create an authentic question. Cite your sources specific to each document. Ensure you cover ALL parts of {goal} mentioned in the documents and that the question is fully self-contained in text form."
+            content += f"\n\nBase your question on content from the uploaded documents. These may be lecture slides, past exams, or textbook content. Extract specific concepts, examples, or problems from these materials to create an authentic question. Cite your sources after the question. Ensure you cover ALL parts of {goal} mentioned in the documents and that the question is fully self-contained in text form."
             
         print("--- generating question ---")
         print(content)
