@@ -114,9 +114,9 @@ async def on_member_join(member):
             welcome_message = (
                 f"👋 Welcome back to {member.guild.name}, {member.name}! I'm here to help you continue learning.\n\n"
                 f"You can use the following commands:\n"
-                f"- `!topic [subject]` - Start learning about a specific topic\n"
+                f"- `!goal [subject]` - Set a learning goal for this session\n"
                 f"- `!answer [A/B/C/D/E]` - Answer the current question\n"
-                f"- `!question [question]` - Ask any question about the topic\n"
+                f"- `!ask [question]` - Ask any question about the set goal\n"
                 f"- `!upload` - Upload PDF documents to study from (attach files with this command)"
             )
         else:
@@ -124,9 +124,9 @@ async def on_member_join(member):
             welcome_message = (
                 f"👋 Hello {member.name}! I'm your study buddy, ready to help you learn!\n\n"
                 f"You can use the following commands:\n"
-                f"- `!topic [subject]` - Start learning about a specific topic\n"
+                f"- `!goal [subject]` - Set a learning goal for this session\n"
                 f"- `!answer [A/B/C/D/E]` - Answer the current question\n"
-                f"- `!question [question]` - Ask any question about the topic\n"
+                f"- `!ask [question]` - Ask any question about the set goal\n"
                 f"- `!upload` - Upload PDF documents to study from (attach files with this command)\n\n"
                 f"What would you like to learn about today?"
             )
