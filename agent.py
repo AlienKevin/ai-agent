@@ -684,7 +684,7 @@ Evaluate the student's answer and provide detailed feedback."""
         feedback = []
         
         for i, (question, user_answer) in enumerate(zip(quiz_state.questions, quiz_state.user_answers), 1):
-            question_text, correct_answers, concept = question
+            question_text, correct_answers = question
             
             # Evaluate the answer
             eval_result = await self._evaluate_answer(question_text, user_answer, correct_answers)
@@ -827,7 +827,6 @@ Evaluate the student's answer and provide detailed feedback."""
         # Handle answers during quiz
         if state["state"] == UserState.IN_QUIZ:
             quiz_state = state["quiz_state"]
-            print("!!!!!!", command, argument)
 
             if command == Command.ANSWER:
                 if argument == "INVALID":
@@ -844,7 +843,7 @@ Evaluate the student's answer and provide detailed feedback."""
                     return await self._grade_quiz(quiz_state)
                     
                 return result
-            elif argument == "FORCE_GRADE":
+            elif message.content == "!answer FORCE_GRADE":
                 return await self._grade_quiz(quiz_state)
             else:
                 return "You're currently in a quiz. Use `!answer [letter]` to submit your answer."
