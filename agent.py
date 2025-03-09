@@ -416,6 +416,7 @@ Evaluate the student's answer and provide detailed feedback."""
             "- `!answer [letter]` or `!answer [letters]` - Answer the current question (e.g., `!answer A` or `!answer A,B,C` for multiple answers)\n"
             "- `!answer not sure` - Skip the current question if you don't know the answer\n"
             "- `!ask [question]` - Ask any question related to the set goal\n"
+            "- `!quiz [duration]` - Start a timed quiz on the current topic (e.g., `!quiz 10` for a 10 minute quiz)\n"
             "- `!upload` - Upload PDF documents to study from (attach files with this command)"
             f"{pdf_message}"
         )
@@ -839,6 +840,12 @@ Evaluate the student's answer and provide detailed feedback."""
         """Handle an answer during a quiz"""
         quiz_state = state["quiz_state"]
         
+        # Handle forced grading from timer expiration
+        #if user_answer == "FORCE_GRADE":
+        #    state["state"] = UserState.ASKING_QUESTION
+        #    state["quiz_state"] = None
+        #    return await self._grade_quiz(quiz_state)
+        
         if quiz_state.is_finished():
             # Quiz is over, grade it
             state["state"] = UserState.ASKING_QUESTION
@@ -893,7 +900,6 @@ Evaluate the student's answer and provide detailed feedback."""
         # Handle quiz command
         if command == Command.QUIZ:
             try:
-                print("!!!!!!", argument)
                 duration = int(argument)
                 return await self._handle_quiz_command(duration, state)
             except ValueError:
@@ -902,7 +908,8 @@ Evaluate the student's answer and provide detailed feedback."""
         # Handle answers during quiz
         if state["state"] == UserState.IN_QUIZ:
             quiz_state = state["quiz_state"]
-            
+            print("!!!!!!", command, argument)
+
             if command == Command.ANSWER:
                 if argument == "INVALID":
                     return "Invalid answer format. Please use `!answer [letter]` (e.g., `!answer A`)."
@@ -918,6 +925,8 @@ Evaluate the student's answer and provide detailed feedback."""
                     return await self._grade_quiz(quiz_state)
                     
                 return result
+            elif argument == "FORCE_GRADE":
+                return await self._grade_quiz(quiz_state)
             else:
                 return "You're currently in a quiz. Use `!answer [letter]` to submit your answer."
             

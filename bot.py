@@ -5,7 +5,7 @@ import asyncio
 
 from discord.ext import commands
 from dotenv import load_dotenv
-from agent import StudyAgent, Command
+from agent import StudyAgent, Command, UserState
 
 PREFIX = "!"
 
@@ -191,7 +191,7 @@ async def upload(ctx):
 
 
 @bot.command(name="quiz", help="Start a timed quiz on the current topic")
-async def quiz(ctx, *, duration):
+async def quiz(ctx, duration: int):
     """Start a timed quiz on the current topic.
     
     Args:
@@ -215,29 +215,41 @@ async def quiz(ctx, *, duration):
     
     quiz_state = state["quiz_state"]
     
-    # Update timer every 15 seconds until quiz ends
+    # Update timer every 5 seconds until quiz ends
     while not quiz_state.is_finished():
-        await asyncio.sleep(15)  # Wait 15 seconds
+        await asyncio.sleep(5)  # Wait 5 seconds
         
         # Check if quiz is still active
         if state["state"] != UserState.IN_QUIZ or not state["quiz_state"]:
             break
             
         try:
-            # Update the time remaining
-            await quiz_message.edit(content=f"{quiz_message.content.split('Time remaining:')[0]}"
-                                        f"Time remaining: {quiz_state.format_time_remaining()}")
+            # Get the current message content
+            current_content = quiz_message.content
+            
+            # Split content at "Time remaining:" and keep the first part
+            base_content = current_content.split("Time remaining:")[0]
+            remainder = current_content.split("Time remaining:")[1][6:]
+            
+            # Update the message with new time
+            new_content = f"{base_content}Time remaining: {quiz_state.format_time_remaining()} {remainder}"
+
+            if current_content != new_content:  # Only update if content changed
+                await quiz_message.edit(content=new_content)
+                
         except discord.NotFound:
             # Message was deleted
             break
-        except discord.HTTPException:
-            # Failed to edit message
+        except discord.HTTPException as e:
+            logger.error(f"Failed to update quiz timer: {e}")
             continue
     
     # If quiz is still active when time expires, grade it
     if state["state"] == UserState.IN_QUIZ and state["quiz_state"]:
-        response = await agent.run(ctx.message)  # This will trigger grading
-        await ctx.send(response)
+        # Create a new message context with an answer to trigger grading
+        ctx.message.content = "!answer FORCE_GRADE"  # This will trigger grading logic
+        response = await agent.run(ctx.message)
+        await ctx.send("⏰ Time's up! Grading your quiz...\n\n" + response)
 
 
 # Start the bot, connecting it to the gateway
