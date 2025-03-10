@@ -76,6 +76,7 @@ class Command(Enum):
     GOAL = "goal"
     UPLOAD = "upload"
     QUIZ = "quiz"
+    END = "end"  # Add this new command
     NONE = "none"
 
 class InitialView(View):
@@ -87,6 +88,29 @@ class InitialView(View):
     async def goal_button(self, interaction: discord.Interaction, button: Button):
         modal = GoalModal(self.agent)
         await interaction.response.send_modal(modal)
+        
+    @discord.ui.button(label="End Session", style=discord.ButtonStyle.danger)
+    async def end_session_button(self, interaction: discord.Interaction, button: Button):
+        user_id = str(interaction.user.id)
+        
+        # Keep PDF files but reset everything else
+        pdf_files = self.agent.conversation_state.get(user_id, {}).get("pdf_files", [])
+        
+        # Reset to initial state
+        self.agent.conversation_state[user_id] = {
+            "state": UserState.INITIAL,
+            "goal": None,
+            "question": None,
+            "correct_answers": [],
+            "question_history": [],
+            "pdf_files": pdf_files,
+            "quiz_state": None
+        }
+        
+        await interaction.response.send_message(
+            "Session ended. All progress has been reset.",
+            view=InitialView(self.agent)
+        )
 
 class PDFOptionView(View):
     def __init__(self, agent):
@@ -227,21 +251,22 @@ class FeedbackView(View):
         state["correct_answers"] = self.next_correct_answers
         
         await interaction.response.send_message(self.next_question, view=view)
-
-    @discord.ui.button(label="Ask Follow-up Question", style=discord.ButtonStyle.success)
-    async def followup_button(self, interaction: discord.Interaction, button: Button):
+    
+    @discord.ui.button(label="Ask Follow-up Question", style=discord.ButtonStyle.secondary)
+    async def follow_up_button(self, interaction: discord.Interaction, button: Button):
         modal = FollowUpQuestionModal(self.agent, self.next_question, self.next_correct_answers)
         await interaction.response.send_modal(modal)
-
+    
     @discord.ui.button(label="End Session", style=discord.ButtonStyle.danger)
     async def end_session_button(self, interaction: discord.Interaction, button: Button):
         user_id = str(interaction.user.id)
+        state = self.agent.conversation_state[user_id]
         
         # Generate learning summary before resetting state
-        summary = await self._generate_learning_summary(self.agent.conversation_state[user_id])
+        summary = await self._generate_learning_summary(state)
         
         # Reset state but keep PDF files
-        pdf_files = self.agent.conversation_state[user_id].get("pdf_files", [])
+        pdf_files = state.get("pdf_files", [])
         self.agent.conversation_state[user_id] = {
             "state": UserState.INITIAL,
             "goal": None,
@@ -347,44 +372,61 @@ class FollowUpQuestionModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             # Acknowledge the interaction immediately to prevent timeout
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer(ephemeral=False)
             
             user_id = str(interaction.user.id)
             state = self.agent.conversation_state[user_id]
             
-            # Create a simpler prompt without trying to get previous feedback
-            custom_prompt = (
-                f"The student is learning about {state['goal']} and has asked a follow-up question about the previous question.\n\n"
-                f"Previous question: {state['question']}\n\n"
-                f"Follow-up question: {self.question.value}\n\n"
-                f"Please answer this follow-up question clearly and concisely, addressing the specific points of confusion."
-            )
+            # Get the previous question and correct answers for context
+            previous_question = state.get("question", "")
+            previous_correct_answers = state.get("correct_answers", [])
             
-            # Handle the follow-up question with the custom prompt
+            # Format the correct answers for display
+            if isinstance(previous_correct_answers, list):
+                if len(previous_correct_answers) == 1:
+                    correct_answer_display = previous_correct_answers[0]
+                else:
+                    correct_answer_display = ", ".join(sorted(previous_correct_answers))
+            else:
+                correct_answer_display = str(previous_correct_answers)
+            
+            # Create a detailed prompt with context
+            prompt = f"""The student is learning about {state.get('goal', 'the subject')} and has asked a follow-up question.
+
+Previous question: {previous_question}
+Correct answer: {correct_answer_display}
+
+Follow-up question: {self.question.value}
+
+Please provide a clear, helpful answer to this follow-up question, specifically addressing the student's question in the context of the previous question and answer. Focus on explaining the concept in a way that's easy to understand.
+
+IMPORTANT: Keep your response under 1500 characters to fit within Discord's message limits."""
+            
+            # Generate the response
             response = self.agent.client.models.generate_content(
                 model=MODEL,
-                contents=[custom_prompt],
+                contents=[prompt],
                 config={
-                    "max_output_tokens": 500,
+                    "max_output_tokens": 400,  # Reduced to ensure we stay under Discord's limit
                     "temperature": 0.7
                 }
             )
             
+            # Truncate response if it's still too long
             response_text = response.text
+            if len(response_text) > 1900:  # Leave some room for formatting
+                response_text = response_text[:1900] + "... (truncated)"
             
             # Create feedback view for next steps
             view = FeedbackView(self.agent, self.next_question, self.next_correct_answers)
             
-            # Use followup.send instead of response.send_message since we deferred
+            # Send the response
             await interaction.followup.send(response_text, view=view)
             
         except Exception as e:
-            # If any error occurs, send a simple error message
             print(f"Error in follow-up question: {e}")
-            
-            # Use followup.send since we deferred the response
             await interaction.followup.send(
-                "I'm sorry, I encountered an error processing your follow-up question. Please try again with a different question.",
+                f"I'm sorry, I encountered an error processing your follow-up question: {str(e)}. Please try again with a different question.",
                 ephemeral=True
             )
 
@@ -1223,39 +1265,33 @@ Evaluate the student's answer and provide detailed feedback."""
                     ))
         return contents
     
-    def _parse_command(self, message_content):
-        """Parse the message to identify commands and their arguments"""
-        for command, pattern in self.command_patterns.items():
-            match = re.match(pattern, message_content, re.IGNORECASE)
-            if match:
-                if command == Command.ANSWER:
-                    answer_text = match.group(1).strip().upper()
-                    # Handle "not sure" case
-                    if re.match(r'NOT SURE', answer_text, re.IGNORECASE):
-                        return command, "NOT SURE"
-                    
-                    # Handle multiple answers (e.g., "A,B,C" or "A B C" or "A, B, C")
-                    if ',' in answer_text or ' ' in answer_text:
-                        # Split by comma or space and clean up
-                        answers = re.split(r'[,\s]+', answer_text)
-                        # Filter out empty strings and sort
-                        answers = sorted([a.strip() for a in answers if a.strip()])
-                        # Validate each answer is a valid option
-                        valid_answers = [a for a in answers if re.match(r'^[A-E]$', a)]
-                        if valid_answers:
-                            return command, valid_answers
-                        return command, "INVALID"
-                    
-                    # Single answer
-                    if re.match(r'^[A-E]$', answer_text):
-                        return command, answer_text
-                    return command, "INVALID"
-                    
-                elif command in [Command.ASK, Command.GOAL, Command.QUIZ]:
-                    return command, match.group(1)
-                else:  # Command.UPLOAD
-                    return command, None
-        return Command.NONE, message_content
+    def _parse_command(self, message_text: str):
+        """Parse a command from a message"""
+        if not message_text.startswith("!"):
+            return Command.NONE, message_text
+        
+        parts = message_text[1:].split(" ", 1)
+        command = parts[0].lower()
+        argument = parts[1] if len(parts) > 1 else ""
+        
+        if command == "answer":
+            # Normalize answer format
+            argument = argument.strip().upper()
+            if argument not in ["A", "B", "C", "D", "E", "NOT SURE"]:
+                return Command.ANSWER, "INVALID"
+            return Command.ANSWER, argument
+        elif command == "ask":
+            return Command.ASK, argument
+        elif command == "goal":
+            return Command.GOAL, argument
+        elif command == "upload":
+            return Command.UPLOAD, argument
+        elif command == "quiz":
+            return Command.QUIZ, argument
+        elif command == "end":  # Add this new case
+            return Command.END, argument
+        else:
+            return Command.NONE, message_text
         
     async def _handle_question(self, question, goal, pdf_files=None):
         """Handle a question from the user about the goal"""
@@ -1548,6 +1584,27 @@ Evaluate the student's answer and provide detailed feedback."""
         # Parse the command from the message
         command, argument = self._parse_command(message.content)
         
+        # Handle end session command - this takes priority over all other commands
+        if command == Command.END:
+            # Reset state but keep PDF files
+            pdf_files = state.get("pdf_files", [])
+            self.conversation_state[user_id] = {
+                "state": UserState.INITIAL,
+                "goal": None,
+                "question": None,
+                "correct_answers": [],
+                "question_history": [],
+                "pdf_files": pdf_files,
+                "quiz_state": None
+            }
+            
+            # Show initial view
+            await message.channel.send(
+                "Session ended. All progress has been reset.",
+                view=InitialView(self.agent)
+            )
+            return None
+        
         # Handle attachments with !upload command
         if command == Command.UPLOAD or (command == Command.NONE and message.attachments):
             return await self._handle_pdf_attachments(message)
@@ -1791,3 +1848,31 @@ class QuizResultsView(View):
         ]
         
         return "\n".join(feedback)
+
+class EndSessionView(View):
+    def __init__(self, agent):
+        super().__init__(timeout=None)
+        self.agent = agent
+
+    @discord.ui.button(label="End Session", style=discord.ButtonStyle.danger)
+    async def end_session_button(self, interaction: discord.Interaction, button: Button):
+        user_id = str(interaction.user.id)
+        
+        # Keep PDF files but reset everything else
+        pdf_files = self.agent.conversation_state.get(user_id, {}).get("pdf_files", [])
+        
+        # Reset to initial state
+        self.agent.conversation_state[user_id] = {
+            "state": UserState.INITIAL,
+            "goal": None,
+            "question": None,
+            "correct_answers": [],
+            "question_history": [],
+            "pdf_files": pdf_files,
+            "quiz_state": None
+        }
+        
+        await interaction.response.send_message(
+            "Session ended. All progress has been reset.",
+            view=InitialView(self.agent)
+        )
