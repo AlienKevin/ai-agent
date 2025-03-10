@@ -12,6 +12,7 @@ import hashlib
 import time
 from discord.ui import Button, View
 from typing import Optional, List
+import asyncio
 
 MODEL = "gemini-2.0-flash"
 
@@ -516,47 +517,82 @@ class ResponseView(View):
         )
 
 class QuizMCQView(MCQView):
-    """Extends MCQView to include a timer display for quizzes"""
     def __init__(self, agent, question_text: str, correct_answers: list, quiz_state: QuizState):
         super().__init__(agent, question_text, correct_answers)
         self.quiz_state = quiz_state
+        self.timer_button = discord.ui.Button(
+            label=f"Time remaining: {quiz_state.format_time_remaining()}",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+            row=0
+        )
+        self.add_item(self.timer_button)
         
-        # Add a timer display to the question text
-        self.question_with_timer = f"Time remaining: {quiz_state.format_time_remaining()}\n\n{question_text}"
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Check if the quiz has expired before processing any button interaction"""
-        user_id = str(interaction.user.id)
-        state = self.agent.conversation_state[user_id]
-        quiz_state = state.get("quiz_state")
-        
-        if quiz_state and quiz_state.is_finished():
-            # Quiz has expired, end it automatically
-            response = await self.agent._grade_quiz(quiz_state)
-            
-            # Reset state but keep PDF files
-            pdf_files = state.get("pdf_files", [])
-            self.agent.conversation_state[user_id] = {
-                "state": UserState.INITIAL,
-                "goal": None,
-                "question": None,
-                "correct_answers": [],
-                "question_history": [],
-                "pdf_files": pdf_files,
-                "quiz_state": None
-            }
-            
-            # Show quiz results and initial view
-            await interaction.response.send_message(
-                f"{response}\n\nTime's up! Quiz has ended. What would you like to do next?",
-                view=InitialView(self.agent)
-            )
-            return False  # Prevent the original button callback from running
-            
-        return True  # Allow the interaction to proceed
-
-    @discord.ui.button(label="End Quiz", style=discord.ButtonStyle.danger, custom_id="end_quiz")
+        # Start the timer update task using the asyncio event loop
+        self.timer_task = asyncio.get_event_loop().create_task(self.update_timer())
+    
+    async def update_timer(self):
+        """Update the timer display every second"""
+        try:
+            while not self.quiz_state.is_finished() and not self.is_finished():
+                # Wait for 1 second
+                await asyncio.sleep(1)
+                
+                # Update the timer button label
+                self.timer_button.label = f"Time remaining: {self.quiz_state.format_time_remaining()}"
+                
+                # Try to update the message with the new view
+                # This might fail if the view is no longer being displayed
+                try:
+                    if hasattr(self, 'message') and self.message:
+                        await self.message.edit(view=self)
+                except Exception as e:
+                    print(f"Error updating timer: {e}")
+                    break
+                    
+            # If we exited because the quiz finished, handle it
+            if self.quiz_state.is_finished() and hasattr(self, 'message') and self.message:
+                try:
+                    # Get the user ID from the message
+                    if hasattr(self.message, 'interaction') and self.message.interaction:
+                        user_id = str(self.message.interaction.user.id)
+                        state = self.agent.conversation_state.get(user_id)
+                        
+                        if state and state.get("quiz_state") == self.quiz_state:
+                            # Grade the quiz
+                            response = await self.agent._grade_quiz(self.quiz_state)
+                            
+                            # Reset state but keep PDF files
+                            pdf_files = state.get("pdf_files", [])
+                            self.agent.conversation_state[user_id] = {
+                                "state": UserState.INITIAL,
+                                "goal": None,
+                                "question": None,
+                                "correct_answers": [],
+                                "question_history": [],
+                                "pdf_files": pdf_files,
+                                "quiz_state": None
+                            }
+                            
+                            # Send a new message with the results
+                            await self.message.channel.send(
+                                f"{response}\n\nTime's up! Quiz has ended. What would you like to do next?",
+                                view=InitialView(self.agent)
+                            )
+                except Exception as e:
+                    print(f"Error handling quiz end: {e}")
+        except asyncio.CancelledError:
+            # Task was cancelled, clean up
+            pass
+        except Exception as e:
+            print(f"Error in timer task: {e}")
+    
+    @discord.ui.button(label="End Quiz", style=discord.ButtonStyle.danger, custom_id="end_quiz", row=4)
     async def end_quiz_button(self, interaction: discord.Interaction, button: Button):
+        # Cancel the timer task
+        if hasattr(self, 'timer_task') and not self.timer_task.done():
+            self.timer_task.cancel()
+            
         user_id = str(interaction.user.id)
         state = self.agent.conversation_state[user_id]
         
@@ -571,7 +607,8 @@ class QuizMCQView(MCQView):
             "question": None,
             "correct_answers": [],
             "question_history": [],
-            "pdf_files": pdf_files
+            "pdf_files": pdf_files,
+            "quiz_state": None
         }
         
         # Show quiz results and initial view
@@ -581,35 +618,72 @@ class QuizMCQView(MCQView):
         )
     
     async def _handle_answer(self, interaction: discord.Interaction, answer):
+        # Cancel the timer task for this view since we're moving to a new question
+        if hasattr(self, 'timer_task') and not self.timer_task.done():
+            self.timer_task.cancel()
+            
         # Acknowledge the interaction immediately
         await interaction.response.defer()
         
         user_id = str(interaction.user.id)
         state = self.agent.conversation_state[user_id]
+        quiz_state = state["quiz_state"]
         
-        # Get feedback for the answer
-        response = await self.agent._handle_question_answer(answer, state)
+        if quiz_state.is_finished():
+            # Quiz is over, grade it
+            response = await self.agent._grade_quiz(quiz_state)
+            
+            # Reset state but keep PDF files
+            pdf_files = state.get("pdf_files", [])
+            self.agent.conversation_state[user_id] = {
+                "state": UserState.INITIAL,
+                "goal": None,
+                "question": None,
+                "correct_answers": [],
+                "question_history": [],
+                "pdf_files": pdf_files,
+                "quiz_state": None
+            }
+            
+            await interaction.followup.send(
+                f"{response}\n\nTime's up! Quiz has ended. What would you like to do next?", 
+                view=InitialView(self.agent)
+            )
+            return
         
-        # Generate next question (but don't show it yet)
-        next_question, next_correct_answers, _ = await self.agent._generate_question(
+        # Record the answer
+        quiz_state.user_answers.append(answer)
+        
+        # Generate next question
+        question, correct_answers, concept = await self.agent._generate_question(
             state["goal"],
             state["question_history"],
             state["pdf_files"]
         )
         
-        # Create feedback view with options
-        view = FeedbackView(self.agent, next_question, next_correct_answers)
+        # Store the question
+        quiz_state.questions.append((question, correct_answers, concept))
         
-        # Send feedback with options but NOT the next question
-        await interaction.followup.send(response, view=view)
+        # Create view for next question with updated timer
+        next_view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
+        
+        # Show time remaining with each question
+        message = await interaction.followup.send(
+            
+            f"Next question:\n{question}",
+            view=next_view
+        )
+        
+        # Store the message reference in the view for timer updates
+        next_view.message = message
 
 class QuizDurationModal(discord.ui.Modal):
     def __init__(self, agent):
-        super().__init__(title="Start Quiz")
+        super().__init__(title="Quiz Duration")
         self.agent = agent
         self.duration = discord.ui.TextInput(
             label="Quiz Duration (minutes)",
-            placeholder="Enter duration (1-60 minutes)",
+            placeholder="Enter a number between 1-60",
             required=True,
             max_length=2
         )
@@ -642,18 +716,25 @@ class QuizDurationModal(discord.ui.Modal):
             
             quiz_state.questions.append((question, correct_answers, concept))
             
-            # Create MCQ view for quiz with timer display
+            # Create MCQ view for quiz
             view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
             
-            # Use the question_with_timer property that includes the timer
-            await interaction.response.send_message(
-                f"Starting {duration}-minute quiz on {state['goal']}\n\n{view.question_with_timer}",
-                view=view
+            # Format message with timer
+            message = (
+                f"Starting {duration}-minute quiz on {state['goal']}\n"
+                f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
+                f"{question}"
             )
+            
+            # Send the message
+            await interaction.response.send_message(message, view=view)
+            
+            # We can't directly store the message reference here since interaction.response.send_message
+            # doesn't return the message object. The timer will still work but won't update the UI.
             
         except ValueError:
             await interaction.response.send_message(
-                "Please enter a valid number between 1 and 60.",
+                "Please enter a valid number for the quiz duration.",
                 ephemeral=True
             )
 
@@ -1300,8 +1381,8 @@ Evaluate the student's answer and provide detailed feedback."""
             # Generate next question
             state["question"], state["correct_answers"], _ = await self._generate_question(
                 state["goal"], 
-                question_history=state["question_history"],
-                pdf_files=pdf_files
+                state["question_history"],
+                state["pdf_files"]
             )
             
             # Prepare response with feedback only (no next question)
@@ -1351,7 +1432,7 @@ Evaluate the student's answer and provide detailed feedback."""
         state["question"], state["correct_answers"], _ = await self._generate_question(
             state["goal"], 
             state["question_history"],
-            pdf_files
+            state["pdf_files"]
         )
         
         # Return only the feedback
@@ -1487,6 +1568,39 @@ Evaluate the student's answer and provide detailed feedback."""
             f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
             f"Next question:\n{question}"
         )
+
+    async def _handle_quiz_command(self, duration_minutes: int, state: dict):
+        """Handle the quiz command"""
+        if not state["goal"]:
+            return "Please set a learning goal first using `!goal [learning goal]`"
+        
+        if duration_minutes < 1 or duration_minutes > 60:
+            return "Quiz duration must be between 1 and 60 minutes."
+        
+        # Initialize quiz state
+        quiz_state = QuizState(duration_minutes, state["goal"])
+        state["quiz_state"] = quiz_state
+        state["state"] = UserState.IN_QUIZ
+        
+        # Generate first question
+        question, correct_answers, concept = await self._generate_question(
+            state["goal"],
+            state["question_history"],
+            state["pdf_files"]
+        )
+        
+        quiz_state.questions.append((question, correct_answers, concept))
+        
+        # Create MCQ view for quiz
+        view = QuizMCQView(self, question, correct_answers, quiz_state)
+        
+        message = (
+            f"Starting {duration_minutes}-minute quiz on {state['goal']}\n"
+            f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
+            f"{question}"
+        )
+        
+        return message, view
 
     async def run(self, message: discord.Message):
         user_id = str(message.author.id)
