@@ -631,7 +631,7 @@ class QuizMCQView(MCQView):
             state["state"] = UserState.ASKING_QUESTION
             state["quiz_state"] = None
             response, view = await self.agent._grade_quiz(quiz_state)
-            await self._send_long_message(interaction, response, view)
+            await interaction.followup.send(response, view=view)
             return
         
         # Generate next question
@@ -655,8 +655,7 @@ class QuizMCQView(MCQView):
                 f"Next question:\n{question}"
             )
             
-            # Handle long messages
-            await self._send_long_message(interaction, message, next_view)
+            await interaction.followup.send(message, view=next_view)
             
         except Exception as e:
             print(f"Error generating next question: {e}")
@@ -753,28 +752,38 @@ class PracticeMCQView(MCQView):
         super().__init__(agent, question, correct_answers)
         
     async def _handle_answer(self, interaction: discord.Interaction, answer):
-        """Handle a practice question answer (not part of a quiz)"""
-        # Acknowledge the interaction immediately to prevent timeout
+        # Acknowledge the interaction immediately
         await interaction.response.defer()
         
         user_id = str(interaction.user.id)
         state = self.agent.conversation_state[user_id]
         
-        # Get feedback for the answer
-        response = await self.agent._handle_question_answer(answer, state)
-        
-        # Generate next question (but don't show it yet)
-        next_question, correct_answers = await self.agent._generate_question(
-            state["goal"],
-            state["question_history"],
-            state["pdf_files"]
-        )
-        
-        # Create feedback view with options
-        view = FeedbackView(self.agent, next_question, correct_answers)
-        
-        # Send feedback with options but NOT the next question
-        await interaction.followup.send(response, view=view)
+        # Start a background task for the API call
+        asyncio.create_task(self._process_answer_in_background(interaction, answer, state))
+
+    async def _process_answer_in_background(self, interaction, answer, state):
+        try:
+            # Get feedback for the answer (this can take time)
+            response = await self.agent._handle_question_answer(answer, state)
+            
+            # Generate next question (this can also take time)
+            next_question, correct_answers = await self.agent._generate_question(
+                state["goal"],
+                state["question_history"],
+                state["pdf_files"]
+            )
+            
+            # Create feedback view with options
+            view = FeedbackView(self.agent, next_question, correct_answers)
+            
+            # Send feedback with options
+            await interaction.followup.send(response, view=view)
+        except Exception as e:
+            print(f"Error processing answer: {e}")
+            await interaction.followup.send(
+                "I encountered an error processing your answer. Please try again.",
+                view=InitialView(self.agent)
+            )
 
 class StudyAgent:
     def __init__(self):
@@ -1698,9 +1707,8 @@ class QuizResultsView(View):
         # Get the feedback for the current question
         feedback = self._get_current_feedback()
         
-        # Send the feedback
-        await interaction.response.defer()
-        await self._send_long_message(interaction, feedback)
+        # Update the message with the new view
+        await interaction.response.edit_message(content=feedback, view=self)
     
     @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, disabled=False)
     async def next_button(self, interaction: discord.Interaction, button: Button):
@@ -1710,9 +1718,8 @@ class QuizResultsView(View):
         # Get the feedback for the current question
         feedback = self._get_current_feedback()
         
-        # Send the feedback
-        await interaction.response.defer()
-        await self._send_long_message(interaction, feedback)
+        # Update the message with the new view
+        await interaction.response.edit_message(content=feedback, view=self)
     
     @discord.ui.button(label="New Goal", style=discord.ButtonStyle.success)
     async def new_goal_button(self, interaction: discord.Interaction, button: Button):
@@ -1741,71 +1748,3 @@ class QuizResultsView(View):
         )
         
         return feedback
-    
-    async def _send_long_message(self, interaction, content, view=None):
-        """Handle sending messages that might exceed Discord's character limit"""
-        # If no view is provided, use self
-        if view is None:
-            view = self
-            
-        # Discord has a 2000 character limit
-        if len(content) <= 1900:  # Leave some margin
-            await interaction.followup.send(content, view=view)
-            return
-            
-        # Split the content into parts
-        parts = []
-        current_part = ""
-        
-        # Split by lines to avoid breaking in the middle of a line
-        lines = content.split('\n')
-        
-        for line in lines:
-            # If adding this line would exceed the limit, start a new part
-            if len(current_part) + len(line) + 1 > 1900:
-                parts.append(current_part)
-                current_part = line
-            else:
-                if current_part:
-                    current_part += '\n' + line
-                else:
-                    current_part = line
-        
-        # Add the last part if it's not empty
-        if current_part:
-            parts.append(current_part)
-        
-        # Send all parts except the last one without a view
-        for i in range(len(parts) - 1):
-            await interaction.followup.send(parts[i])
-        
-        # Send the last part with the view
-        await interaction.followup.send(parts[-1], view=view)
-
-class EndSessionView(View):
-    def __init__(self, agent):
-        super().__init__(timeout=None)
-        self.agent = agent
-
-    @discord.ui.button(label="End Session", style=discord.ButtonStyle.danger)
-    async def end_session_button(self, interaction: discord.Interaction, button: Button):
-        user_id = str(interaction.user.id)
-        
-        # Keep PDF files but reset everything else
-        pdf_files = self.agent.conversation_state.get(user_id, {}).get("pdf_files", [])
-        
-        # Reset to initial state
-        self.agent.conversation_state[user_id] = {
-            "state": UserState.INITIAL,
-            "goal": None,
-            "question": None,
-            "correct_answers": [],
-            "question_history": [],
-            "pdf_files": pdf_files,
-            "quiz_state": None
-        }
-        
-        await interaction.response.send_message(
-            "Session ended. All progress has been reset.",
-            view=InitialView(self.agent)
-        )
