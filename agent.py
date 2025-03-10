@@ -393,28 +393,74 @@ class MCQView(View):
         self.agent = agent
         self.question_text = question_text
         self.correct_answers = correct_answers
+        self.selected_options = set()  # Track selected options
+        self.is_multiple_answer = len(correct_answers) > 1
+        
+        # Add a label to indicate if multiple answers are allowed
+        self.add_item(discord.ui.Button(
+            label="Multiple answers allowed" if self.is_multiple_answer else "Select one answer",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+            row=0
+        ))
 
-    @discord.ui.button(label="A", style=discord.ButtonStyle.secondary, custom_id="mcq_A")
+    @discord.ui.button(label="A", style=discord.ButtonStyle.secondary, custom_id="mcq_A", row=1)
     async def button_a(self, interaction: discord.Interaction, button: Button):
-        await self._handle_answer(interaction, "A")
+        await self._toggle_option(interaction, button, "A")
 
-    @discord.ui.button(label="B", style=discord.ButtonStyle.secondary, custom_id="mcq_B")
+    @discord.ui.button(label="B", style=discord.ButtonStyle.secondary, custom_id="mcq_B", row=1)
     async def button_b(self, interaction: discord.Interaction, button: Button):
-        await self._handle_answer(interaction, "B")
+        await self._toggle_option(interaction, button, "B")
 
-    @discord.ui.button(label="C", style=discord.ButtonStyle.secondary, custom_id="mcq_C")
+    @discord.ui.button(label="C", style=discord.ButtonStyle.secondary, custom_id="mcq_C", row=1)
     async def button_c(self, interaction: discord.Interaction, button: Button):
-        await self._handle_answer(interaction, "C")
+        await self._toggle_option(interaction, button, "C")
 
-    @discord.ui.button(label="D", style=discord.ButtonStyle.secondary, custom_id="mcq_D")
+    @discord.ui.button(label="D", style=discord.ButtonStyle.secondary, custom_id="mcq_D", row=2)
     async def button_d(self, interaction: discord.Interaction, button: Button):
-        await self._handle_answer(interaction, "D")
+        await self._toggle_option(interaction, button, "D")
 
-    @discord.ui.button(label="Not Sure", style=discord.ButtonStyle.danger, custom_id="mcq_not_sure")
+    @discord.ui.button(label="E", style=discord.ButtonStyle.secondary, custom_id="mcq_E", row=2)
+    async def button_e(self, interaction: discord.Interaction, button: Button):
+        await self._toggle_option(interaction, button, "E")
+
+    @discord.ui.button(label="Not Sure", style=discord.ButtonStyle.danger, custom_id="mcq_not_sure", row=3)
     async def button_not_sure(self, interaction: discord.Interaction, button: Button):
         await self._handle_answer(interaction, "NOT SURE")
 
-    async def _handle_answer(self, interaction: discord.Interaction, answer: str):
+    @discord.ui.button(label="Submit Answer", style=discord.ButtonStyle.success, custom_id="mcq_submit", row=3)
+    async def submit_button(self, interaction: discord.Interaction, button: Button):
+        if not self.selected_options:
+            await interaction.response.send_message("Please select at least one option before submitting.", ephemeral=True)
+            return
+            
+        # Convert set to sorted list for consistent display
+        selected_list = sorted(list(self.selected_options))
+        
+        # If only one answer is selected but multiple are allowed, that's fine
+        # If only one answer is expected but multiple are selected, we'll still process it
+        await self._handle_answer(interaction, selected_list)
+
+    async def _toggle_option(self, interaction: discord.Interaction, button: Button, option: str):
+        """Toggle selection of an option"""
+        if option in self.selected_options:
+            self.selected_options.remove(option)
+            button.style = discord.ButtonStyle.secondary
+        else:
+            # If not multiple answer, clear previous selections
+            if not self.is_multiple_answer:
+                self.selected_options.clear()
+                # Reset all buttons to secondary style
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button) and child.custom_id and child.custom_id.startswith("mcq_") and len(child.custom_id) == 5:
+                        child.style = discord.ButtonStyle.secondary
+            
+            self.selected_options.add(option)
+            button.style = discord.ButtonStyle.primary
+            
+        await interaction.response.edit_message(view=self)
+
+    async def _handle_answer(self, interaction: discord.Interaction, answer):
         # Acknowledge the interaction immediately
         await interaction.response.defer()
         
@@ -534,56 +580,28 @@ class QuizMCQView(MCQView):
             view=InitialView(self.agent)
         )
     
-    async def _handle_answer(self, interaction: discord.Interaction, answer: str):
+    async def _handle_answer(self, interaction: discord.Interaction, answer):
         # Acknowledge the interaction immediately
         await interaction.response.defer()
         
         user_id = str(interaction.user.id)
         state = self.agent.conversation_state[user_id]
-        quiz_state = state["quiz_state"]
         
-        # Check if quiz time has expired
-        if quiz_state.is_finished():
-            # Quiz is over, grade it
-            state["state"] = UserState.INITIAL
-            response = await self.agent._grade_quiz(quiz_state)
-            
-            # Reset state but keep PDF files
-            pdf_files = state.get("pdf_files", [])
-            self.agent.conversation_state[user_id] = {
-                "state": UserState.INITIAL,
-                "goal": None,
-                "question": None,
-                "correct_answers": [],
-                "question_history": [],
-                "pdf_files": pdf_files,
-                "quiz_state": None
-            }
-            
-            await interaction.followup.send(
-                f"{response}\n\nTime's up! Quiz has ended. What would you like to do next?", 
-                view=InitialView(self.agent)
-            )
-            return
+        # Get feedback for the answer
+        response = await self.agent._handle_question_answer(answer, state)
         
-        # Record the answer
-        quiz_state.user_answers.append(answer)
-        
-        # Generate next question
-        question, correct_answers, concept = await self.agent._generate_question(
+        # Generate next question (but don't show it yet)
+        next_question, next_correct_answers, _ = await self.agent._generate_question(
             state["goal"],
             state["question_history"],
             state["pdf_files"]
         )
         
-        # Store the question
-        quiz_state.questions.append((question, correct_answers, concept))
+        # Create feedback view with options
+        view = FeedbackView(self.agent, next_question, next_correct_answers)
         
-        # Create view for next question with updated timer
-        next_view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
-        
-        # Show time remaining with each question
-        await interaction.followup.send(next_view.question_with_timer, view=next_view)
+        # Send feedback with options but NOT the next question
+        await interaction.followup.send(response, view=view)
 
 class QuizDurationModal(discord.ui.Modal):
     def __init__(self, agent):
