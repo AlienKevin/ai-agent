@@ -1388,7 +1388,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         for attachment in message.attachments:
             if attachment.filename.lower().endswith('.pdf'):
-                filepath = await self._save_attachment(attachment, user_id)
+                filepath = await self._save_attachment(attachment)
                 state["pdf_files"].append(filepath)
                 pdf_files.append(filepath)
         
