@@ -486,27 +486,98 @@ class MCQView(View):
         await interaction.response.edit_message(view=self)
 
     async def _handle_answer(self, interaction: discord.Interaction, answer):
-        # Acknowledge the interaction immediately
+        # Cancel the timer task for this view since we're moving to a new question
+        if hasattr(self, 'timer_task') and not self.timer_task.done():
+            self.timer_task.cancel()
+        
+        # Acknowledge the interaction immediately to prevent timeout
         await interaction.response.defer()
         
         user_id = str(interaction.user.id)
         state = self.agent.conversation_state[user_id]
+        quiz_state = state["quiz_state"]
         
-        # Get feedback for the answer
-        response = await self.agent._handle_question_answer(answer, state)
+        # Record the answer
+        quiz_state.user_answers.append(answer)
         
-        # Generate next question (but don't show it yet)
-        next_question, next_correct_answers = await self.agent._generate_question(
-            state["goal"],
-            state["question_history"],
-            state["pdf_files"]
-        )
+        # Check if quiz is finished
+        if quiz_state.is_finished():
+            # Quiz is over, grade it
+            state["state"] = UserState.ASKING_QUESTION
+            state["quiz_state"] = None
+            response, view = await self.agent._grade_quiz(quiz_state)
+            await self._send_long_message(interaction, response, view)
+            return
         
-        # Create feedback view with options
-        view = FeedbackView(self.agent, next_question, next_correct_answers)
+        # Generate next question
+        try:
+            # Get the next question
+            question, correct_answers = await self.agent._generate_question(
+                state["goal"],
+                state["question_history"],
+                state["pdf_files"]
+            )
+            
+            # Store the question (without concept since it's not returned)
+            quiz_state.questions.append((question, correct_answers))
+            
+            # Create view for next question with updated timer
+            next_view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
+            
+            # Show time remaining with each question
+            message = (
+                f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
+                f"Next question:\n{question}"
+            )
+            
+            # Handle long messages
+            await self._send_long_message(interaction, message, next_view)
+            
+        except Exception as e:
+            print(f"Error generating next question: {e}")
+            # End the quiz early if there's an error
+            state["state"] = UserState.ASKING_QUESTION
+            state["quiz_state"] = None
+            await interaction.followup.send(
+                "I encountered an error generating the next question. The quiz has been ended.",
+                view=InitialView(self.agent)
+            )
+
+    async def _send_long_message(self, interaction, content, view=None):
+        """Handle sending messages that might exceed Discord's character limit"""
+        # Discord has a 2000 character limit
+        if len(content) <= 1900:  # Leave some margin
+            await interaction.followup.send(content, view=view)
+            return
+            
+        # Split the content into parts
+        parts = []
+        current_part = ""
         
-        # Send feedback with options but NOT the next question
-        await interaction.followup.send(response, view=view)
+        # Split by lines to avoid breaking in the middle of a line
+        lines = content.split('\n')
+        
+        for line in lines:
+            # If adding this line would exceed the limit, start a new part
+            if len(current_part) + len(line) + 1 > 1900:
+                parts.append(current_part)
+                current_part = line
+            else:
+                if current_part:
+                    current_part += '\n' + line
+                else:
+                    current_part = line
+        
+        # Add the last part if it's not empty
+        if current_part:
+            parts.append(current_part)
+        
+        # Send all parts except the last one without a view
+        for i in range(len(parts) - 1):
+            await interaction.followup.send(parts[i])
+        
+        # Send the last part with the view
+        await interaction.followup.send(parts[-1], view=view)
 
 class ResponseView(View):
     def __init__(self, agent):
@@ -630,46 +701,59 @@ class QuizMCQView(MCQView):
         # Cancel the timer task for this view since we're moving to a new question
         if hasattr(self, 'timer_task') and not self.timer_task.done():
             self.timer_task.cancel()
-            
-        # Acknowledge the interaction immediately
+        
+        # Acknowledge the interaction immediately to prevent timeout
         await interaction.response.defer()
         
         user_id = str(interaction.user.id)
         state = self.agent.conversation_state[user_id]
         quiz_state = state["quiz_state"]
         
-        if quiz_state.is_finished():
-            # Quiz is over, grade it and show the first question feedback
-            response, view = await self.agent._grade_quiz(quiz_state)
-            
-            # Show quiz results with the first question feedback
-            await interaction.followup.send(response, view=view)
-            return
-        
         # Record the answer
         quiz_state.user_answers.append(answer)
         
+        # Check if quiz is finished
+        if quiz_state.is_finished():
+            # Quiz is over, grade it
+            state["state"] = UserState.ASKING_QUESTION
+            state["quiz_state"] = None
+            response, view = await self.agent._grade_quiz(quiz_state)
+            await self._send_long_message(interaction, response, view)
+            return
+        
         # Generate next question
-        question, correct_answers, concept = await self.agent._generate_question(
-            state["goal"],
-            state["question_history"],
-            state["pdf_files"]
-        )
-        
-        # Store the question
-        quiz_state.questions.append((question, correct_answers, concept))
-        
-        # Create view for next question with updated timer
-        next_view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
-        
-        # Show time remaining with each question
-        message = await interaction.followup.send(
-            f"Next question:\n{question}",
-            view=next_view
-        )
-        
-        # Store the message reference in the view for timer updates
-        next_view.message = message
+        try:
+            # Get the next question
+            question, correct_answers = await self.agent._generate_question(
+                state["goal"],
+                state["question_history"],
+                state["pdf_files"]
+            )
+            
+            # Store the question (without concept since it's not returned)
+            quiz_state.questions.append((question, correct_answers))
+            
+            # Create view for next question with updated timer
+            next_view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
+            
+            # Show time remaining with each question
+            message = (
+                f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
+                f"Next question:\n{question}"
+            )
+            
+            # Handle long messages
+            await self._send_long_message(interaction, message, next_view)
+            
+        except Exception as e:
+            print(f"Error generating next question: {e}")
+            # End the quiz early if there's an error
+            state["state"] = UserState.ASKING_QUESTION
+            state["quiz_state"] = None
+            await interaction.followup.send(
+                "I encountered an error generating the next question. The quiz has been ended.",
+                view=InitialView(self.agent)
+            )
 
 class QuizDurationModal(discord.ui.Modal):
     def __init__(self, agent):
@@ -685,9 +769,12 @@ class QuizDurationModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            # Acknowledge the interaction immediately to prevent timeout
+            await interaction.response.defer()
+            
             duration = int(self.duration.value)
             if duration < 1 or duration > 60:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Quiz duration must be between 1 and 60 minutes.",
                     ephemeral=True
                 )
@@ -702,35 +789,51 @@ class QuizDurationModal(discord.ui.Modal):
             state["state"] = UserState.IN_QUIZ
             
             # Generate first question
-            question, correct_answers, concept = await self.agent._generate_question(
-                state["goal"],
-                state["question_history"],
-                state["pdf_files"]
-            )
-            
-            quiz_state.questions.append((question, correct_answers, concept))
-            
-            # Create MCQ view for quiz
-            view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
-            
-            # Format message with timer
-            message = (
-                f"Starting {duration}-minute quiz on {state['goal']}\n"
-                f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
-                f"{question}"
-            )
-            
-            # Send the message
-            await interaction.response.send_message(message, view=view)
-            
-            # We can't directly store the message reference here since interaction.response.send_message
-            # doesn't return the message object. The timer will still work but won't update the UI.
-            
+            try:
+                question, correct_answers = await self.agent._generate_question(
+                    state["goal"],
+                    state["question_history"],
+                    state["pdf_files"]
+                )
+                
+                quiz_state.questions.append((question, correct_answers))
+                
+                # Create MCQ view for quiz
+                view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
+                
+                # Format message with timer
+                message = (
+                    f"Starting {duration}-minute quiz on {state['goal']}\n"
+                    f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
+                    f"{question}"
+                )
+                
+                # Send the message using followup since we deferred
+                await interaction.followup.send(message, view=view)
+                
+            except Exception as e:
+                print(f"Error in quiz generation: {e}")
+                # Reset state
+                state["state"] = UserState.ASKING_QUESTION
+                state["quiz_state"] = None
+                
+                await interaction.followup.send(
+                    "I encountered an error starting your quiz. Please try again."
+                )
+                
         except ValueError:
-            await interaction.response.send_message(
-                "Please enter a valid number for the quiz duration.",
-                ephemeral=True
-            )
+            # If we haven't responded yet, use response
+            try:
+                await interaction.response.send_message(
+                    "Please enter a valid number for the quiz duration.",
+                    ephemeral=True
+                )
+            except discord.errors.InteractionResponded:
+                # If we've already responded, use followup
+                await interaction.followup.send(
+                    "Please enter a valid number for the quiz duration.",
+                    ephemeral=True
+                )
 
 class PracticeMCQView(MCQView):
     def __init__(self, agent, question_text: str, correct_answers: list):
@@ -859,6 +962,9 @@ class StudyAgent:
         if pdf_files and len(pdf_files) > 0:
             content += f"\n\nBase your question on content from the uploaded documents. These may be lecture slides, past exams, or textbook content. Extract specific concepts, examples, or problems from these materials to create an authentic question. Cite your sources after the question. Ensure you cover ALL parts of {goal} mentioned in the documents and that the question is fully self-contained in text form."
         
+        # Add instruction to keep the question concise
+        content += "\n\nIMPORTANT: Keep the question and options concise. The entire formatted question including all options must be under 1500 characters to fit within Discord's message limits."
+        
         contents = []
         
         # Add PDF files to the contents if available
@@ -982,7 +1088,12 @@ class StudyAgent:
         print("--- formatted question ---")
         print(formatted_question)
 
-        # Return the formatted question, correct answers, and concept tested
+        # After formatting the question, check its length and truncate if needed
+        if len(formatted_question) > 1800:  # Leave some margin for additional text
+            # Truncate and add a note
+            formatted_question = formatted_question[:1750] + "...\n[Question truncated due to length]"
+        
+        # Return the formatted question, correct answers
         return formatted_question, question_data['correct_answers']
 
     async def _evaluate_answer(self, question: str, user_answer: str, correct_answers: list, pdf_files=None):
@@ -1401,47 +1512,85 @@ Evaluate the student's answer and provide detailed feedback."""
             return "I can only process PDF files at the moment. Please send PDF documents."
 
     async def _grade_quiz(self, quiz_state):
-        """Grade a completed quiz and provide feedback for the first question"""
-        if not quiz_state or not quiz_state.questions:
-            return "No quiz data available to grade."
-        
-        # Calculate overall score
-        total_questions = len(quiz_state.user_answers)
+        """Grade a completed quiz and return results"""
+        total_questions = len(quiz_state.questions)
         correct_count = 0
         
-        # Grade each question
-        for i, (user_answer, (question, correct_answers, concept)) in enumerate(
+        # Create a list to store question results
+        results = []
+        
+        # Zip questions and answers together
+        for i, (user_answer, question_data) in enumerate(
             zip(quiz_state.user_answers, quiz_state.questions)
         ):
-            # Convert user_answer to list if it's a string (single answer)
-            user_answers = user_answer if isinstance(user_answer, list) else [user_answer]
+            # Unpack question data (handle both 2-value and 3-value tuples)
+            if len(question_data) == 3:
+                question, correct_answers, concept = question_data
+            else:
+                question, correct_answers = question_data
+                concept = "General concept"  # Default concept
             
-            # Check if answer is correct (all required answers are present and no incorrect ones)
-            is_correct = set(user_answers) == set(correct_answers)
+            # Convert to sets for comparison
+            user_answer_set = set(user_answer if isinstance(user_answer, list) else [user_answer])
+            correct_answer_set = set(correct_answers if isinstance(correct_answers, list) else [correct_answers])
             
+            # Check if answer is correct
+            is_correct = user_answer_set == correct_answer_set
             if is_correct:
                 correct_count += 1
-
+            
+            # Format the user's answer for display
+            if len(user_answer_set) == 1:
+                user_answer_display = next(iter(user_answer_set))
+            else:
+                user_answer_display = ", ".join(sorted(user_answer_set))
+            
+            # Format the correct answer for display
+            if len(correct_answer_set) == 1:
+                correct_answer_display = next(iter(correct_answer_set))
+            else:
+                correct_answer_display = ", ".join(sorted(correct_answer_set))
+            
+            # Add to results
+            results.append({
+                "question": question,
+                "user_answer": user_answer_display,
+                "correct_answer": correct_answer_display,
+                "is_correct": is_correct,
+                "concept": concept
+            })
+        
         # Calculate score
         score_percent = (correct_count / total_questions * 100) if total_questions > 0 else 0
         
-        # Create initial message with score
-        message = [
-            f"**Quiz Completed!**",
-            f"Topic: {quiz_state.goal}",
-            f"Score: {correct_count}/{total_questions} ({score_percent:.1f}%)",
-            f"",
-            f"Let's review your answers one by one:",
-            f""
-        ]
+        # Generate summary message - keep it concise
+        summary = (
+            f"**Quiz Results**\n\n"
+            f"Topic: {quiz_state.goal}\n"
+            f"Score: {correct_count}/{total_questions} ({score_percent:.1f}%)\n\n"
+        )
         
-        # Create the results view starting with the first question
-        view = QuizResultsView(self, quiz_state, 0)
+        # Add first question feedback - truncate if needed
+        if results:
+            first_result = results[0]
+            # Get a shortened version of the question (first 200 chars)
+            short_question = first_result['question'][:200]
+            if len(first_result['question']) > 200:
+                short_question += "..."
+                
+            summary += (
+                f"**Question 1 of {total_questions}**\n\n"
+                f"{short_question}\n\n"
+                f"Your answer: {first_result['user_answer']}\n"
+                f"Correct answer: {first_result['correct_answer']}\n"
+                f"Result: {'✅ Correct' if first_result['is_correct'] else '❌ Incorrect'}\n"
+                f"Concept: {first_result['concept']}\n"
+            )
         
-        # Add the feedback for the first question
-        message.append(view._get_current_feedback())
+        # Create view for reviewing results
+        view = QuizResultsView(self, results, 0)
         
-        return "\n".join(message), view
+        return summary, view
 
     async def _handle_quiz_answer(self, user_answer: str, state: dict):
         """Handle an answer during a quiz"""
@@ -1681,106 +1830,114 @@ Evaluate the student's answer and provide detailed feedback."""
         return "\n".join(response)
 
 class QuizResultsView(View):
-    def __init__(self, agent, quiz_state, current_index=0):
+    def __init__(self, agent, results, current_index=0):
         super().__init__(timeout=None)
         self.agent = agent
-        self.quiz_state = quiz_state
+        self.results = results
         self.current_index = current_index
-        self.total_questions = len(quiz_state.user_answers)
+        self.total_questions = len(results)
         
-        # Disable next button if we're on the last question
-        if self.current_index >= self.total_questions - 1:
-            self.next_button.disabled = True
-            
-        # Disable previous button if we're on the first question
-        if self.current_index <= 0:
-            self.previous_button.disabled = True
+        # Update button states based on current index
+        self.update_button_states()
+        
+    def update_button_states(self):
+        # Disable prev button if at first question
+        self.prev_button.disabled = (self.current_index == 0)
+        
+        # Disable next button if at last question
+        self.next_button.disabled = (self.current_index == self.total_questions - 1)
     
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
-    async def previous_button(self, interaction: discord.Interaction, button: Button):
-        if self.current_index > 0:
-            # Show the previous question's feedback
-            new_view = QuizResultsView(self.agent, self.quiz_state, self.current_index - 1)
-            await interaction.response.edit_message(content=self._get_current_feedback(), view=new_view)
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, disabled=True)
+    async def prev_button(self, interaction: discord.Interaction, button: Button):
+        self.current_index = max(0, self.current_index - 1)
+        self.update_button_states()
+        
+        # Get the feedback for the current question
+        feedback = self._get_current_feedback()
+        
+        # Send the feedback
+        await interaction.response.defer()
+        await self._send_long_message(interaction, feedback)
     
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, disabled=False)
     async def next_button(self, interaction: discord.Interaction, button: Button):
-        if self.current_index < self.total_questions - 1:
-            # Show the next question's feedback
-            new_view = QuizResultsView(self.agent, self.quiz_state, self.current_index + 1)
-            await interaction.response.edit_message(content=self._get_current_feedback(), view=new_view)
+        self.current_index = min(self.total_questions - 1, self.current_index + 1)
+        self.update_button_states()
+        
+        # Get the feedback for the current question
+        feedback = self._get_current_feedback()
+        
+        # Send the feedback
+        await interaction.response.defer()
+        await self._send_long_message(interaction, feedback)
     
-    @discord.ui.button(label="Summary", style=discord.ButtonStyle.success)
-    async def summary_button(self, interaction: discord.Interaction, button: Button):
-        # Generate and show the overall summary
-        summary = await self.agent._generate_quiz_summary(self.quiz_state)
-        await interaction.response.edit_message(content=summary, view=None)
-        
-        # Show the initial view for next steps
-        await interaction.followup.send("What would you like to do next?", view=InitialView(self.agent))
-    
-    @discord.ui.button(label="End Quiz", style=discord.ButtonStyle.danger)
-    async def end_button(self, interaction: discord.Interaction, button: Button):
-        # Reset user state but keep PDF files
-        user_id = str(interaction.user.id)
-        state = self.agent.conversation_state[user_id]
-        pdf_files = state.get("pdf_files", [])
-        
-        self.agent.conversation_state[user_id] = {
-            "state": UserState.INITIAL,
-            "goal": None,
-            "question": None,
-            "correct_answers": [],
-            "question_history": [],
-            "pdf_files": pdf_files,
-            "quiz_state": None
-        }
-        
-        # Show the initial view
-        await interaction.response.edit_message(content="Quiz ended.", view=None)
-        await interaction.followup.send("What would you like to do next?", view=InitialView(self.agent))
+    @discord.ui.button(label="New Goal", style=discord.ButtonStyle.success)
+    async def new_goal_button(self, interaction: discord.Interaction, button: Button):
+        modal = GoalModal(self.agent)
+        await interaction.response.send_modal(modal)
     
     def _get_current_feedback(self):
-        """Get feedback for the current question"""
-        if self.current_index >= len(self.quiz_state.user_answers):
-            return "No more questions to review."
+        """Get the feedback for the current question"""
+        if not self.results or self.current_index >= len(self.results):
+            return "No question data available."
             
-        # Get the current question data
-        user_answer = self.quiz_state.user_answers[self.current_index]
-        question, correct_answers, concept = self.quiz_state.questions[self.current_index]
+        result = self.results[self.current_index]
         
-        # Convert user_answer to list if it's a string (single answer)
-        user_answers = user_answer if isinstance(user_answer, list) else [user_answer]
+        # Truncate question if it's too long
+        question = result['question']
+        if len(question) > 1000:  # Truncate very long questions
+            question = question[:1000] + "...\n[Question truncated due to length]"
         
-        # Check if answer is correct
-        is_correct = set(user_answers) == set(correct_answers)
+        feedback = (
+            f"**Question {self.current_index + 1} of {self.total_questions}**\n\n"
+            f"{question}\n\n"
+            f"Your answer: {result['user_answer']}\n"
+            f"Correct answer: {result['correct_answer']}\n"
+            f"Result: {'✅ Correct' if result['is_correct'] else '❌ Incorrect'}\n"
+            f"Concept: {result['concept']}\n"
+        )
         
-        # Format the user's answer for display
-        if len(user_answers) == 1:
-            user_answer_display = user_answers[0]
-        else:
-            user_answer_display = ", ".join(sorted(user_answers))
+        return feedback
+    
+    async def _send_long_message(self, interaction, content, view=None):
+        """Handle sending messages that might exceed Discord's character limit"""
+        # If no view is provided, use self
+        if view is None:
+            view = self
             
-        # Format the correct answer for display
-        if len(correct_answers) == 1:
-            correct_answer_display = correct_answers[0]
-        else:
-            correct_answer_display = ", ".join(sorted(correct_answers))
+        # Discord has a 2000 character limit
+        if len(content) <= 1900:  # Leave some margin
+            await interaction.followup.send(content, view=view)
+            return
+            
+        # Split the content into parts
+        parts = []
+        current_part = ""
         
-        # Build the feedback message
-        feedback = [
-            f"**Question {self.current_index + 1} of {self.total_questions}**",
-            f"",
-            f"{question}",
-            f"",
-            f"Your answer: {user_answer_display}",
-            f"Correct answer: {correct_answer_display}",
-            f"Result: {'✅ Correct' if is_correct else '❌ Incorrect'}",
-            f"Concept: {concept}",
-            f"",
-        ]
+        # Split by lines to avoid breaking in the middle of a line
+        lines = content.split('\n')
         
-        return "\n".join(feedback)
+        for line in lines:
+            # If adding this line would exceed the limit, start a new part
+            if len(current_part) + len(line) + 1 > 1900:
+                parts.append(current_part)
+                current_part = line
+            else:
+                if current_part:
+                    current_part += '\n' + line
+                else:
+                    current_part = line
+        
+        # Add the last part if it's not empty
+        if current_part:
+            parts.append(current_part)
+        
+        # Send all parts except the last one without a view
+        for i in range(len(parts) - 1):
+            await interaction.followup.send(parts[i])
+        
+        # Send the last part with the view
+        await interaction.followup.send(parts[-1], view=view)
 
 class EndSessionView(View):
     def __init__(self, agent):
