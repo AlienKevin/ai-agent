@@ -486,98 +486,11 @@ class MCQView(View):
         await interaction.response.edit_message(view=self)
 
     async def _handle_answer(self, interaction: discord.Interaction, answer):
-        # Cancel the timer task for this view since we're moving to a new question
-        if hasattr(self, 'timer_task') and not self.timer_task.done():
-            self.timer_task.cancel()
-        
-        # Acknowledge the interaction immediately to prevent timeout
-        await interaction.response.defer()
-        
-        user_id = str(interaction.user.id)
-        state = self.agent.conversation_state[user_id]
-        quiz_state = state["quiz_state"]
-        
-        # Record the answer
-        quiz_state.user_answers.append(answer)
-        
-        # Check if quiz is finished
-        if quiz_state.is_finished():
-            # Quiz is over, grade it
-            state["state"] = UserState.ASKING_QUESTION
-            state["quiz_state"] = None
-            response, view = await self.agent._grade_quiz(quiz_state)
-            await self._send_long_message(interaction, response, view)
-            return
-        
-        # Generate next question
-        try:
-            # Get the next question
-            question, correct_answers = await self.agent._generate_question(
-                state["goal"],
-                state["question_history"],
-                state["pdf_files"]
-            )
-            
-            # Store the question (without concept since it's not returned)
-            quiz_state.questions.append((question, correct_answers))
-            
-            # Create view for next question with updated timer
-            next_view = QuizMCQView(self.agent, question, correct_answers, quiz_state)
-            
-            # Show time remaining with each question
-            message = (
-                f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
-                f"Next question:\n{question}"
-            )
-            
-            # Handle long messages
-            await self._send_long_message(interaction, message, next_view)
-            
-        except Exception as e:
-            print(f"Error generating next question: {e}")
-            # End the quiz early if there's an error
-            state["state"] = UserState.ASKING_QUESTION
-            state["quiz_state"] = None
-            await interaction.followup.send(
-                "I encountered an error generating the next question. The quiz has been ended.",
-                view=InitialView(self.agent)
-            )
-
-    async def _send_long_message(self, interaction, content, view=None):
-        """Handle sending messages that might exceed Discord's character limit"""
-        # Discord has a 2000 character limit
-        if len(content) <= 1900:  # Leave some margin
-            await interaction.followup.send(content, view=view)
-            return
-            
-        # Split the content into parts
-        parts = []
-        current_part = ""
-        
-        # Split by lines to avoid breaking in the middle of a line
-        lines = content.split('\n')
-        
-        for line in lines:
-            # If adding this line would exceed the limit, start a new part
-            if len(current_part) + len(line) + 1 > 1900:
-                parts.append(current_part)
-                current_part = line
-            else:
-                if current_part:
-                    current_part += '\n' + line
-                else:
-                    current_part = line
-        
-        # Add the last part if it's not empty
-        if current_part:
-            parts.append(current_part)
-        
-        # Send all parts except the last one without a view
-        for i in range(len(parts) - 1):
-            await interaction.followup.send(parts[i])
-        
-        # Send the last part with the view
-        await interaction.followup.send(parts[-1], view=view)
+        """Base implementation to be overridden by subclasses"""
+        await interaction.response.send_message(
+            "This method should be overridden by subclasses.",
+            ephemeral=True
+        )
 
 class ResponseView(View):
     def __init__(self, agent):
@@ -836,104 +749,32 @@ class QuizDurationModal(discord.ui.Modal):
                 )
 
 class PracticeMCQView(MCQView):
-    def __init__(self, agent, question_text: str, correct_answers: list):
-        super().__init__(agent, question_text, correct_answers)
-    
-    @discord.ui.button(label="End Session", style=discord.ButtonStyle.danger, custom_id="end_session")
-    async def end_session_button(self, interaction: discord.Interaction, button: Button):
+    def __init__(self, agent, question, correct_answers):
+        super().__init__(agent, question, correct_answers)
+        
+    async def _handle_answer(self, interaction: discord.Interaction, answer):
+        """Handle a practice question answer (not part of a quiz)"""
+        # Acknowledge the interaction immediately to prevent timeout
+        await interaction.response.defer()
+        
         user_id = str(interaction.user.id)
         state = self.agent.conversation_state[user_id]
         
-        # Generate learning summary before resetting state
-        summary = await self._generate_learning_summary(state)
+        # Get feedback for the answer
+        response = await self.agent._handle_question_answer(answer, state)
         
-        # Reset state but keep PDF files
-        pdf_files = state.get("pdf_files", [])
-        self.agent.conversation_state[user_id] = {
-            "state": UserState.INITIAL,
-            "goal": None,
-            "question": None,
-            "correct_answers": [],
-            "question_history": [],
-            "pdf_files": pdf_files
-        }
-        
-        # Show summary and initial view
-        await interaction.response.send_message(
-            f"**Learning Session Summary**\n\n{summary}\n\nSession ended. What would you like to do next?",
-            view=InitialView(self.agent)
+        # Generate next question (but don't show it yet)
+        next_question, correct_answers = await self.agent._generate_question(
+            state["goal"],
+            state["question_history"],
+            state["pdf_files"]
         )
-    
-    async def _generate_learning_summary(self, state):
-        """Generate a summary of the learning session"""
-        question_history = state.get("question_history", [])
-        goal = state.get("goal", "Unknown topic")
         
-        if not question_history:
-            return "No questions were answered in this session."
+        # Create feedback view with options
+        view = FeedbackView(self.agent, next_question, correct_answers)
         
-        # Calculate statistics
-        total_questions = len(question_history)
-        correct_answers = sum(1 for q in question_history if q.get("is_correct", False))
-        incorrect_answers = total_questions - correct_answers
-        accuracy = (correct_answers / total_questions) * 100 if total_questions > 0 else 0
-        
-        # Collect concepts that were answered incorrectly
-        incorrect_concepts = {}
-        for q in question_history:
-            if not q.get("is_correct", False):
-                concept = q.get("concept", "Unknown concept")
-                incorrect_concepts[concept] = incorrect_concepts.get(concept, 0) + 1
-        
-        # Sort concepts by frequency
-        review_concepts = sorted(incorrect_concepts.items(), key=lambda x: x[1], reverse=True)
-        
-        # Build summary text
-        summary = [
-            f"**Topic:** {goal}",
-            f"**Questions Answered:** {total_questions}",
-            f"**Correct Answers:** {correct_answers}",
-            f"**Incorrect Answers:** {incorrect_answers}",
-            f"**Accuracy:** {accuracy:.1f}%",
-        ]
-        
-        # Add review recommendations if there were incorrect answers
-        if incorrect_answers > 0:
-            summary.append("\n**Concepts to Review:**")
-            for concept, count in review_concepts:
-                summary.append(f"• {concept} ({count} incorrect)")
-        
-        # Generate personalized feedback using Gemini
-        if total_questions >= 3:  # Only generate AI feedback if enough questions were answered
-            try:
-                # Create a prompt for Gemini
-                concepts_tested = [q.get("concept", "Unknown") for q in question_history]
-                correct_concepts = [q.get("concept", "Unknown") for q in question_history if q.get("is_correct", False)]
-                incorrect_concepts = [q.get("concept", "Unknown") for q in question_history if not q.get("is_correct", False)]
-                
-                prompt = (
-                    f"The student has completed a learning session on '{goal}'.\n\n"
-                    f"They answered {total_questions} questions with {correct_answers} correct and {incorrect_answers} incorrect.\n\n"
-                    f"Concepts tested: {', '.join(set(concepts_tested))}\n"
-                    f"Concepts they understood well: {', '.join(set(correct_concepts))}\n"
-                    f"Concepts they struggled with: {', '.join(set(incorrect_concepts))}\n\n"
-                    f"Please provide a brief, encouraging summary (2-3 sentences) of their performance and 1-2 specific suggestions for what to focus on next."
-                )
-                
-                response = self.agent.client.models.generate_content(
-                    model=MODEL,
-                    contents=[prompt],
-                    config={
-                        "max_output_tokens": 200,
-                        "temperature": 0.7
-                    }
-                )
-                
-                summary.append(f"\n**AI Feedback:**\n{response.text}")
-            except Exception as e:
-                print(f"Error generating AI feedback: {e}")
-        
-        return "\n".join(summary)
+        # Send feedback with options but NOT the next question
+        await interaction.followup.send(response, view=view)
 
 class StudyAgent:
     def __init__(self):
@@ -1723,6 +1564,8 @@ Evaluate the student's answer and provide detailed feedback."""
                 
                 result = await self._handle_quiz_answer(argument, state)
                 if result:  # Quiz is finished
+                    state["state"] = UserState.ASKING_QUESTION
+                    state["quiz_state"] = None
                     return result
                     
                 # Check if time expired while processing
