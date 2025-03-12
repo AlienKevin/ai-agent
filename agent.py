@@ -153,7 +153,7 @@ class StudyAgent:
             formatted_question += f"\nE) {question_data['options']['E']}"
         
         # Add source information if available
-        if 'sources' in question_data and question_data['sources']:
+        if pdf_files and 'sources' in question_data and question_data['sources']:
             formatted_question += "\n\nSources:"
             for source in question_data['sources']:
                 formatted_question += f"\n* {source['document_name']}: {source['document_relevance']}"
