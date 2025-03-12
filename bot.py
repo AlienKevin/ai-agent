@@ -32,6 +32,13 @@ class StudyBot(commands.Bot):
         if message.author.bot:
             return
 
+        if message.content.startswith("!clear"):
+            channel = message.channel
+            await message.delete()  # Delete the command message
+
+            deleted = await channel.purge(limit=100)  # Delete last 100 messages
+            await channel.send(f"Deleted {len(deleted)} messages!", delete_after=5)  # Confirmation
+
         # Process with agent
         response = await self.agent.run(message)
         if response:  # Only send if there's a response
