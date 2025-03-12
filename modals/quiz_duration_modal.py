@@ -1,6 +1,7 @@
 import discord
 from model import QuizState, UserState
 from views.quiz_mcq_view import QuizMCQView
+import time
 
 class QuizDurationModal(discord.ui.Modal):
     def __init__(self, agent):
@@ -52,7 +53,7 @@ class QuizDurationModal(discord.ui.Modal):
                 # Format message with timer
                 message = (
                     f"Starting {duration}-minute quiz on {state['goal']}\n"
-                    f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
+                    f"Times up <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>\n\n"
                     f"{question}"
                 )
                 

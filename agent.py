@@ -13,7 +13,7 @@ from views.quiz_results_view import QuizResultsView
 from views.study_mode_view import StudyModeView
 from views.response_view import ResponseView
 
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.0-flash-lite"
 
 class StudyAgent:
     def __init__(self):
@@ -571,7 +571,7 @@ Evaluate the student's answer and provide detailed feedback."""
                 return result
             else:
                 return (
-                    f"Answer recorded. Time remaining: <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>\n\n"
+                    f"Answer recorded. Times up <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>\n\n"
                     f"Next question:\n{state["question"]}"
                 )
         return feedback
@@ -666,7 +666,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         message = (
             f"Starting {duration_minutes}-minute quiz on {state['goal']}\n"
-            f"Time remaining: <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>\n\n"
+            f"Times up <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>\n\n"
             f"{question}"
         )
         
@@ -681,6 +681,63 @@ Evaluate the student's answer and provide detailed feedback."""
             return None
         
         state = self.conversation_state[user_id]
+
+        # Parse the command from the message
+        command, argument = self._parse_command(message.content)
+        
+        # Handle end session command - this takes priority over all other commands
+        if command == Command.END:
+            # Reset state but keep PDF files
+            pdf_files = state.get("pdf_files", [])
+            self.conversation_state[user_id] = {
+                "state": UserState.INITIAL,
+                "goal": None,
+                "question": None,
+                "correct_answers": [],
+                "question_history": [],
+                "pdf_files": pdf_files,
+                "quiz_state": None
+            }
+            
+            # Show initial view
+            await message.channel.send(
+                "Session ended. All progress has been reset.",
+                view=InitialView(self.agent)
+            )
+            return None
+        
+        # Handle attachments with !upload command
+        if command == Command.UPLOAD or (command == Command.NONE and message.attachments):
+            return await self._handle_pdf_attachments(message)
+        
+        # Handle commands based on type
+        if command == Command.GOAL:
+            response, view = await self._handle_goal_switch(state, argument)
+            await message.channel.send(response, view=view)
+            return None
+            
+        if command == Command.ASK:
+            if state["goal"]:
+                return await self._handle_question(argument, state["goal"], state["pdf_files"])
+            else:
+                return "Please set a goal first using `!goal [learning goal]`"
+        
+        # Handle quiz command
+        if command == Command.QUIZ:
+            try:
+                duration = int(argument)
+                response, view = await self._handle_quiz_command(duration, state)
+                await message.channel.send(response, view=view)
+                return None
+            except ValueError:
+                return "Invalid quiz duration. Please specify a number of minutes between 1 and 60."
+        
+        # handles answers not part of a quiz
+        if command == Command.ANSWER:
+            if state["state"] == UserState.ASKING_QUESTION:
+                return await self._handle_question_answer(argument, state)
+            else:
+                return "There's no active question to answer. Use `!goal [learning goal]` to start a new goal."
         
         # Handle regular messages
         if state["state"] == UserState.INITIAL:
