@@ -5,7 +5,7 @@ import asyncio
 
 from discord.ext import commands
 from dotenv import load_dotenv
-from agent import StudyAgent, Command
+from agent import StudyAgent
 
 PREFIX = "!"
 
