@@ -17,7 +17,7 @@ class QuizDurationModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             # Acknowledge the interaction immediately to prevent timeout
-            await interaction.response.defer()
+            await interaction.response.defer(thinking=True)
             
             duration = int(self.duration.value)
             if duration < 1 or duration > 60:
