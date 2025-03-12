@@ -13,7 +13,7 @@ from views.quiz_results_view import QuizResultsView
 from views.study_mode_view import StudyModeView
 from views.response_view import ResponseView
 
-MODEL = "gemini-2.0-flash-lite"
+MODEL = "gemini-2.0-flash"
 
 class StudyAgent:
     def __init__(self):
