@@ -22,16 +22,9 @@ class PracticeMCQView(MCQView):
             # Get feedback for the answer (this can take time)
             response = await self.agent._handle_question_answer(answer, state)
             
-            # Generate next question (this can also take time)
-            next_question, correct_answers = await self.agent._generate_question(
-                state["goal"],
-                state["question_history"],
-                state["pdf_files"]
-            )
-            
             # Create feedback view with options
             from views.feedback_view import FeedbackView
-            view = FeedbackView(self.agent, next_question, correct_answers)
+            view = FeedbackView(self.agent, state["question"], state["correct_answers"])
             
             # Send feedback with options
             await interaction.followup.send(response, view=view)

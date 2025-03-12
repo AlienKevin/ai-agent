@@ -116,21 +116,15 @@ class QuizMCQView(MCQView):
         try:
             # Get feedback for the answer (this can take time)
             response = await self.agent._handle_question_answer(answer, state)
-            
-            # Generate next question (this can also take time)
-            next_question, correct_answers = await self.agent._generate_question(
-                state["goal"],
-                state["question_history"],
-                state["pdf_files"]
-            )
-            
+
+            quiz_state.total_questions += 1
             # Create view for next question with updated timer
-            next_view = QuizMCQView(self.agent, next_question, correct_answers, quiz_state)
+            next_view = QuizMCQView(self.agent, state["question"], state["correct_answers"], quiz_state)
             
             # Show time remaining with each question
             message = (
                 f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
-                f"Next question:\n{next_question}"
+                f"Next question:\n{state['question']}"
             )
             
             await interaction.followup.send(message, view=next_view)

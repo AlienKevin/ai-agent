@@ -56,23 +56,30 @@ class MCQView(View):
         await self._handle_answer(interaction, selected_list)
 
     async def _toggle_option(self, interaction: discord.Interaction, button: Button, option: str):
-        """Toggle selection of an option"""
-        if option in self.selected_options:
-            self.selected_options.remove(option)
-            button.style = discord.ButtonStyle.secondary
-        else:
-            # If not multiple answer, clear previous selections
-            if not self.is_multiple_answer:
-                self.selected_options.clear()
-                # Reset all buttons to secondary style
-                for child in self.children:
-                    if isinstance(child, discord.ui.Button) and child.custom_id and child.custom_id.startswith("mcq_") and len(child.custom_id) == 5:
-                        child.style = discord.ButtonStyle.secondary
-            
-            self.selected_options.add(option)
-            button.style = discord.ButtonStyle.primary
-            
-        await interaction.response.edit_message(view=self)
+        try:
+            """Toggle selection of an option"""
+            if option in self.selected_options:
+                self.selected_options.remove(option)
+                button.style = discord.ButtonStyle.secondary
+            else:
+                # If not multiple answer, clear previous selections
+                if not self.is_multiple_answer:
+                    self.selected_options.clear()
+                    # Reset all buttons to secondary style
+                    for child in self.children:
+                        if isinstance(child, discord.ui.Button) and child.custom_id and child.custom_id.startswith("mcq_") and len(child.custom_id) == 5:
+                            child.style = discord.ButtonStyle.secondary
+                
+                self.selected_options.add(option)
+                button.style = discord.ButtonStyle.primary
+                
+            await interaction.response.edit_message(view=self)
+        except Exception as e:
+            print(f"Error in _toggle_option: {e}")
+            await interaction.followup.send(
+                "I encountered an error processing your answer. Please try again.",
+                ephemeral=True
+            )
 
     async def _handle_answer(self, interaction: discord.Interaction, answer):
         """Base implementation to be overridden by subclasses"""

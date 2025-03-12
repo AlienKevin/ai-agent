@@ -8,7 +8,7 @@ class QuizState:
         self.start_time = time.time()
         self.duration_minutes = duration_minutes
         self.end_time = self.start_time + (duration_minutes * 60)
-        self.current_question_index = 0
+        self.total_questions = 0
         self.is_active = True
 
     def time_remaining(self) -> int:

@@ -546,6 +546,8 @@ Evaluate the student's answer and provide detailed feedback."""
             "concept": concept,
             "is_correct": is_correct
         })
+
+        print(state["question_history"])
         
         # Generate next question focusing on weak areas (but don't include it in the response)
         state["question"], state["correct_answers"] = await self._generate_question(
@@ -564,8 +566,9 @@ Evaluate the student's answer and provide detailed feedback."""
             if quiz_state.is_finished():
                 # Quiz is over, grade it
                 state["state"] = UserState.ASKING_QUESTION
+                result = await self._grade_quiz(state)
                 state["quiz_state"] = None
-                return await self._grade_quiz(state)
+                return result
             else:
                 return (
                     f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
@@ -609,8 +612,9 @@ Evaluate the student's answer and provide detailed feedback."""
         )
         
         # Add first question feedback - truncate if needed
+        quiz_questions = state["question_history"][-state["quiz_state"].total_questions:]
         if state["question_history"]:
-            first_result = state["question_history"][0]
+            first_result = quiz_questions[0]
             # Get a shortened version of the question (first 200 chars)
             short_question = first_result['question'][:200]
             if len(first_result['question']) > 200:
@@ -626,7 +630,7 @@ Evaluate the student's answer and provide detailed feedback."""
             )
         
         # Create view for reviewing results
-        view = QuizResultsView(self, state["question_history"], 0)
+        view = QuizResultsView(self, quiz_questions, 0)
         
         return summary, view
 
@@ -649,6 +653,8 @@ Evaluate the student's answer and provide detailed feedback."""
             state["question_history"],
             state["pdf_files"]
         )
+
+        quiz_state.total_questions += 1
         
         state["question"] = question
         state["correct_answers"] = correct_answers
