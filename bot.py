@@ -37,7 +37,7 @@ class StudyBot(commands.Bot):
             await message.delete()  # Delete the command message
 
             deleted = await channel.purge(limit=100)  # Delete last 100 messages
-            await channel.send(f"Deleted {len(deleted)} messages!", delete_after=5)  # Confirmation
+            return
 
         # Process with agent
         response = await self.agent.run(message)
