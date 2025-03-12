@@ -682,93 +682,12 @@ Evaluate the student's answer and provide detailed feedback."""
         
         state = self.conversation_state[user_id]
         
-        # Parse the command from the message
-        command, argument = self._parse_command(message.content)
-        
-        # Handle end session command - this takes priority over all other commands
-        if command == Command.END:
-            # Reset state but keep PDF files
-            pdf_files = state.get("pdf_files", [])
-            self.conversation_state[user_id] = {
-                "state": UserState.INITIAL,
-                "goal": None,
-                "question": None,
-                "correct_answers": [],
-                "question_history": [],
-                "pdf_files": pdf_files,
-                "quiz_state": None
-            }
-            
-            # Show initial view
-            await message.channel.send(
-                "Session ended. All progress has been reset.",
-                view=InitialView(self.agent)
-            )
-            return None
-        
-        # Handle attachments with !upload command
-        if command == Command.UPLOAD or (command == Command.NONE and message.attachments):
-            return await self._handle_pdf_attachments(message)
-        
-        # Handle commands based on type
-        if command == Command.GOAL:
-            response, view = await self._handle_goal_switch(state, argument)
-            await message.channel.send(response, view=view)
-            return None
-            
-        if command == Command.ASK:
-            if state["goal"]:
-                return await self._handle_question(argument, state["goal"], state["pdf_files"])
-            else:
-                return "Please set a goal first using `!goal [learning goal]`"
-        
-        # Handle quiz command
-        if command == Command.QUIZ:
-            try:
-                duration = int(argument)
-                response, view = await self._handle_quiz_command(duration, state)
-                await message.channel.send(response, view=view)
-                return None
-            except ValueError:
-                return "Invalid quiz duration. Please specify a number of minutes between 1 and 60."
-        
-        # Handle answers during quiz
-        if state["state"] == UserState.IN_QUIZ:
-            quiz_state = state["quiz_state"]
-            
-            if command == Command.ANSWER:
-                if argument == "INVALID":
-                    return "Invalid answer format. Please use `!answer [letter]` (e.g., `!answer A`)."
-                
-                result = await self._handle_quiz_answer(argument, state)
-                if result:  # Quiz is finished
-                    state["state"] = UserState.ASKING_QUESTION
-                    state["quiz_state"] = None
-                    return result
-                    
-                # Check if time expired while processing
-                if quiz_state.is_finished():
-                    state["state"] = UserState.ASKING_QUESTION
-                    state["quiz_state"] = None
-                    return await self._grade_quiz(state)
-                    
-                return result
-            else:
-                return "You're currently in a quiz. Use `!answer [letter]` to submit your answer."
-            
-        # handles answers not part of a quiz
-        if command == Command.ANSWER:
-            if state["state"] == UserState.ASKING_QUESTION:
-                return await self._handle_question_answer(argument, state)
-            else:
-                return "There's no active question to answer. Use `!goal [learning goal]` to start a new goal."
-        
-        # Handle regular messages (no command)
+        # Handle regular messages
         if state["state"] == UserState.INITIAL:
             return await self._handle_initial_state(message.content, state)
-        elif state["state"] == UserState.ASKING_QUESTION:
+        else:
             # Treat as a regular message - suggest using commands
-            return "I didn't recognize that as a command. Please use `!answer [A/B/C/D/E]` or `!answer not sure` to answer the question, `!ask [question]` to ask a question, or `!goal [subject]` to switch topics."
+            return "I didn't recognize that as a command."
 
     async def _generate_quiz_summary(self, quiz_state):
         """Generate an overall summary of the quiz results"""
