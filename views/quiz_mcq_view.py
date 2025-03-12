@@ -1,5 +1,6 @@
 import discord
 import asyncio
+import time
 from discord.ui import Button
 from views.mcq_view import MCQView
 from views.initial_view import InitialView
@@ -10,7 +11,7 @@ class QuizMCQView(MCQView):
         super().__init__(agent, question_text, correct_answers)
         self.quiz_state = quiz_state
         self.timer_button = discord.ui.Button(
-            label=f"Time remaining: {quiz_state.format_time_remaining()}",
+            label=f"<t:{int(time.time()//1 + quiz_state.time_remaining())}:R>",
             style=discord.ButtonStyle.secondary,
             disabled=True,
             row=0
@@ -28,7 +29,7 @@ class QuizMCQView(MCQView):
                 await asyncio.sleep(1)
                 
                 # Update the timer button label
-                self.timer_button.label = f"Time remaining: {self.quiz_state.format_time_remaining()}"
+                self.timer_button.label = f"Time remaining: <t:{int(time.time()//1 + self.quiz_state.time_remaining())}:R>"
                 
                 # Try to update the message with the new view
                 # This might fail if the view is no longer being displayed
@@ -123,7 +124,7 @@ class QuizMCQView(MCQView):
             
             # Show time remaining with each question
             message = (
-                f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
+                f"Answer recorded. Time remaining: <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>\n\n"
                 f"Next question:\n{state['question']}"
             )
             

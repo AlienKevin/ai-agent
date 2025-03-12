@@ -571,7 +571,7 @@ Evaluate the student's answer and provide detailed feedback."""
                 return result
             else:
                 return (
-                    f"Answer recorded. Time remaining: {quiz_state.format_time_remaining()}\n\n"
+                    f"Answer recorded. Time remaining: <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>\n\n"
                     f"Next question:\n{state["question"]}"
                 )
         return feedback
@@ -666,7 +666,7 @@ Evaluate the student's answer and provide detailed feedback."""
         
         message = (
             f"Starting {duration_minutes}-minute quiz on {state['goal']}\n"
-            f"Time remaining: {quiz_state.format_time_remaining()}\n\n"
+            f"Time remaining: <t:{int(time.time()//1 + quiz_state.time_remaining())}:R>\n\n"
             f"{question}"
         )
         
